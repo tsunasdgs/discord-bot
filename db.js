@@ -1,28 +1,27 @@
+// db.js
 import pkg from 'pg';
 const { Pool } = pkg;
-import 'dotenv/config';
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false }
+  ssl: { rejectUnauthorized: false } // Render / Neon 向け
 });
 
-// query 関数をエクスポート
 export async function query(text, params) {
   return pool.query(text, params);
 }
 
-// DB 初期化用関数もあれば
+// DB初期化
 export async function initDB() {
-  await query(`
+  await pool.query(`
     CREATE TABLE IF NOT EXISTS coins (
       user_id TEXT PRIMARY KEY,
-      balance INT DEFAULT 0,
+      balance INT DEFAULT 1000,
       last_daily TIMESTAMP
     );
   `);
 
-  await query(`
+  await pool.query(`
     CREATE TABLE IF NOT EXISTS umas (
       user_id TEXT PRIMARY KEY,
       name TEXT,
@@ -33,5 +32,24 @@ export async function initDB() {
     );
   `);
 
-  // 他のテーブルも同様に作成
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS rumma_races (
+      race_id TEXT PRIMARY KEY,
+      name TEXT,
+      host_id TEXT,
+      status TEXT,
+      horses JSONB,
+      bets JSONB
+    );
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS gacha_items (
+      id SERIAL PRIMARY KEY,
+      name TEXT,
+      rarity TEXT
+    );
+  `);
+
+  console.log("DB initialized");
 }
