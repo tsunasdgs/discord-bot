@@ -72,30 +72,35 @@ client.on('interactionCreate', async interaction => {
     // デイリー
     if (interaction.isButton() && interaction.customId === 'daily') {
       if (interaction.channelId !== DAILY_CHANNEL_ID) 
-        return interaction.reply({ content:'このチャンネルでは使用できません', ephemeral:true });
+        return interaction.reply({ content:'このチャンネルでは使用できません', flags: 64 });
+
       const claimed = await coin.claimDaily(interaction.user.id);
-      return interaction.reply({ content: claimed ? `デイリー取得: ${process.env.DAILY_AMOUNT}S` : '今日のデイリーは取得済み', ephemeral:true });
+      return interaction.reply({ 
+        content: claimed ? `デイリー取得: ${process.env.DAILY_AMOUNT}S` : '今日のデイリーは取得済み',
+        flags: 64
+      });
     }
 
     // 残高
     if (interaction.isButton() && interaction.customId === 'check_balance') {
       const bal = await coin.getBalance(interaction.user.id);
-      return interaction.reply({ content:`あなたの所持S: ${bal}S`, ephemeral:true });
+      return interaction.reply({ content:`あなたの所持S: ${bal}S`, flags: 64 });
     }
 
     // ランキング
     if (interaction.isButton() && interaction.customId === 'view_ranking') {
-      const top = await coin.query('SELECT * FROM coins ORDER BY balance DESC LIMIT 10');
+      const top = await coin.getTop();
       const embed = new EmbedBuilder()
           .setTitle('コインランキング（上位10名）')
           .setColor('Gold')
-          .setDescription(top.rows.map((r,i)=>`${i+1}. <@${r.user_id}> - ${r.balance}S`).join('\n'));
-      return interaction.reply({ embeds:[embed], ephemeral:true });
+          .setDescription(top.map((r,i)=>`${i+1}. <@${r.user_id}> - ${r.balance}S`).join('\n'));
+      return interaction.reply({ embeds:[embed], flags: 64 });
     }
 
     // 管理者操作
     if (interaction.isButton() && interaction.customId === 'admin_adjust') {
       if (interaction.channelId !== ADMIN_CHANNEL_ID || !interaction.member.permissions.has('Administrator')) return;
+
       const modal = new ModalBuilder()
           .setCustomId('adjust_modal')
           .setTitle('ユーザーコイン調整')
@@ -113,18 +118,19 @@ client.on('interactionCreate', async interaction => {
     if (interaction.isModalSubmit() && interaction.customId === 'adjust_modal') {
       const targetId = interaction.fields.getTextInputValue('target_user');
       const amount = parseInt(interaction.fields.getTextInputValue('amount'));
-      if (isNaN(amount)) return interaction.reply({ content:'数値を入力してください', ephemeral:true });
+      if (isNaN(amount)) return interaction.reply({ content:'数値を入力してください', flags: 64 });
+
       await coin.updateCoins(targetId, amount, 'admin', `管理者操作 by ${interaction.user.id}`);
-      return interaction.reply({ content:`ユーザー ${targetId} の所持Sを更新しました`, ephemeral:true });
+      return interaction.reply({ content:`ユーザー ${targetId} の所持Sを更新しました`, flags: 64 });
     }
 
     if (interaction.isButton() && interaction.customId === 'view_history') {
-      const rows = await coin.query('SELECT * FROM history ORDER BY timestamp DESC LIMIT 10');
+      const rows = await coin.getHistory();
       const embed = new EmbedBuilder()
           .setTitle('最近の取引履歴（最新10件）')
           .setColor('Blue')
-          .setDescription(rows.rows.map(r=>`[${r.timestamp.toISOString()}] ${r.user_id} ${r.type} ${r.amount}S - ${r.note}`).join('\n'));
-      return interaction.reply({ embeds:[embed], ephemeral:true });
+          .setDescription(rows.map(r=>`[${r.created_at.toISOString()}] ${r.user_id} ${r.type} ${r.amount}S - ${r.note}`).join('\n'));
+      return interaction.reply({ embeds:[embed], flags: 64 });
     }
 
     // UMA / ガチャ / ルムマ
@@ -133,18 +139,21 @@ client.on('interactionCreate', async interaction => {
       if (interaction.commandName.startsWith('gacha')) await gacha.handleCommand(interaction);
       if (interaction.commandName.startsWith('rumma')) await rumma.handleCommand(interaction);
     }
+
   } catch (err) {
     console.error("インタラクション処理中エラー:", err);
-    try {
-      if (interaction.isRepliable()) {
+
+    // エラー時も reply 済みなら editReply
+    if (interaction.isRepliable()) {
+      try {
         if (!interaction.replied && !interaction.deferred) {
-          await interaction.reply({ content:'エラーが発生しました', ephemeral:true });
+          await interaction.reply({ content:'エラーが発生しました', flags: 64 });
         } else {
-          await interaction.editReply('エラーが発生しました');
+          await interaction.editReply({ content:'エラーが発生しました' });
         }
+      } catch (err2) {
+        console.error('エラーハンドリング失敗:', err2);
       }
-    } catch (err2) {
-      console.error('エラーハンドリング失敗:', err2);
     }
   }
 });
