@@ -1,3 +1,4 @@
+// coin.js
 import { query } from './db.js';
 
 const DAILY_AMOUNT = parseInt(process.env.DAILY_AMOUNT || 100);
@@ -5,7 +6,7 @@ const MESSAGE_AMOUNT = parseInt(process.env.MESSAGE_AMOUNT || 10);
 const MESSAGE_DAILY_LIMIT = parseInt(process.env.MESSAGE_DAILY_LIMIT || 5);
 const FORBIDDEN_WORDS = (process.env.FORBIDDEN_WORDS || '').split(',');
 
-// ユーザー取得 or 初期作成
+// ----- ユーザー取得 or 初期作成 -----
 export async function getUser(userId) {
   const res = await query('SELECT * FROM coins WHERE user_id=$1', [userId]);
   if (res.rows.length) return res.rows[0];
@@ -13,13 +14,13 @@ export async function getUser(userId) {
   return { user_id: userId, balance: 0 };
 }
 
-// 残高確認
+// ----- 残高確認 -----
 export async function getBalance(userId) {
   const user = await getUser(userId);
   return user.balance;
 }
 
-// コイン更新
+// ----- コイン更新 -----
 export async function updateCoins(userId, amount, type='manual', note='') {
   await query(`
     INSERT INTO coins(user_id,balance) VALUES($1,$2)
@@ -32,7 +33,7 @@ export async function updateCoins(userId, amount, type='manual', note='') {
   `, [userId, type, amount, note]);
 }
 
-// 発言報酬チェック
+// ----- 発言報酬チェック -----
 const messageCooldowns = {};
 export async function canRewardMessage(userId, messageContent) {
   const content = messageContent.replace(/\s/g,'');
@@ -42,25 +43,24 @@ export async function canRewardMessage(userId, messageContent) {
   if (messageCooldowns[userId] && now - messageCooldowns[userId] < 60*1000) return false;
   messageCooldowns[userId] = now;
 
-  const today = await query(
+  const todayCount = await query(
     'SELECT COUNT(*) FROM history WHERE user_id=$1 AND type=$2 AND created_at::date = CURRENT_DATE',
-    [userId,'message']
+    [userId, 'message']
   );
-  if (parseInt(today.rows[0].count) >= MESSAGE_DAILY_LIMIT) return false;
+  if (parseInt(todayCount.rows[0].count) >= MESSAGE_DAILY_LIMIT) return false;
 
   return true;
 }
 
-// 発言報酬処理
+// ----- 発言報酬付与 -----
 export async function rewardMessage(userId) {
   await updateCoins(userId, MESSAGE_AMOUNT, 'message', '発言報酬');
 }
 
-// デイリー報酬
+// ----- デイリー報酬 -----
 export async function claimDaily(userId) {
   const today = new Date().toISOString().split('T')[0];
 
-  // 最終取得日を daily_claims で確認
   const res = await query('SELECT last_claim FROM daily_claims WHERE user_id=$1', [userId]);
   if (res.rows.length) {
     if (res.rows[0].last_claim && res.rows[0].last_claim.toISOString().split('T')[0] === today) {
@@ -71,12 +71,23 @@ export async function claimDaily(userId) {
     await query('INSERT INTO daily_claims(user_id,last_claim) VALUES($1,$2)', [userId, today]);
   }
 
-  // コイン付与
   await updateCoins(userId, DAILY_AMOUNT, 'daily', 'デイリー報酬');
   return true;
 }
 
-// デイリーリセット（全ユーザー対象）
+// ----- デイリーリセット（全ユーザー対象） -----
 export async function resetDaily() {
   await query('TRUNCATE daily_claims');
+}
+
+// ----- ランキング取得（上位10名） -----
+export async function getTop(limit=10) {
+  const res = await query('SELECT * FROM coins ORDER BY balance DESC LIMIT $1', [limit]);
+  return res.rows;
+}
+
+// ----- 取引履歴取得（最新10件） -----
+export async function getHistory(limit=10) {
+  const res = await query('SELECT * FROM history ORDER BY created_at DESC LIMIT $1', [limit]);
+  return res.rows;
 }
