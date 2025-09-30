@@ -1,3 +1,7 @@
+import 'dotenv/config';
+// または
+// import dotenv from 'dotenv';
+// dotenv.config();
 import { Client, GatewayIntentBits } from 'discord.js';
 import { initDB } from './db.js';
 import * as coin from './coin.js';
