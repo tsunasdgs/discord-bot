@@ -1,3 +1,4 @@
+import { query, initDB } from './db.js';
 import express from 'express';
 import 'dotenv/config';
 import { Client, GatewayIntentBits } from 'discord.js';
