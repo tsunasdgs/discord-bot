@@ -9,8 +9,8 @@ const FORBIDDEN_WORDS = (process.env.FORBIDDEN_WORDS || '').split(',');
 export async function getUser(userId) {
   const res = await query('SELECT * FROM coins WHERE user_id=$1', [userId]);
   if (res.rows.length) return res.rows[0];
-  await query('INSERT INTO coins(user_id,balance,last_daily) VALUES($1,$2,NULL)', [userId, 0]);
-  return { user_id: userId, balance: 0, last_daily: null };
+  await query('INSERT INTO coins(user_id,balance) VALUES($1,$2)', [userId, 0]);
+  return { user_id: userId, balance: 0 };
 }
 
 // 残高確認
@@ -35,18 +35,15 @@ export async function updateCoins(userId, amount, type='manual', note='') {
 // 発言報酬チェック
 const messageCooldowns = {};
 export async function canRewardMessage(userId, messageContent) {
-  // 禁止ワードチェック
   const content = messageContent.replace(/\s/g,'');
   if (FORBIDDEN_WORDS.some(w => w && content.includes(w))) return false;
 
-  // 1分クールダウン
   const now = Date.now();
   if (messageCooldowns[userId] && now - messageCooldowns[userId] < 60*1000) return false;
   messageCooldowns[userId] = now;
 
-  // 1日上限
   const today = await query(
-    'SELECT COUNT(*) FROM history WHERE user_id=$1 AND type=$2 AND timestamp::date = CURRENT_DATE',
+    'SELECT COUNT(*) FROM history WHERE user_id=$1 AND type=$2 AND created_at::date = CURRENT_DATE',
     [userId,'message']
   );
   if (parseInt(today.rows[0].count) >= MESSAGE_DAILY_LIMIT) return false;
@@ -61,15 +58,25 @@ export async function rewardMessage(userId) {
 
 // デイリー報酬
 export async function claimDaily(userId) {
-  const user = await getUser(userId);
-  const now = new Date();
-  if (user.last_daily && new Date(user.last_daily).toDateString() === now.toDateString()) return false;
+  const today = new Date().toISOString().split('T')[0];
+
+  // 最終取得日を daily_claims で確認
+  const res = await query('SELECT last_claim FROM daily_claims WHERE user_id=$1', [userId]);
+  if (res.rows.length) {
+    if (res.rows[0].last_claim && res.rows[0].last_claim.toISOString().split('T')[0] === today) {
+      return false; // 今日取得済み
+    }
+    await query('UPDATE daily_claims SET last_claim=$2 WHERE user_id=$1', [userId, today]);
+  } else {
+    await query('INSERT INTO daily_claims(user_id,last_claim) VALUES($1,$2)', [userId, today]);
+  }
+
+  // コイン付与
   await updateCoins(userId, DAILY_AMOUNT, 'daily', 'デイリー報酬');
-  await query('UPDATE coins SET last_daily=$1 WHERE user_id=$2', [now, userId]);
   return true;
 }
 
-// デイリーリセット（朝5時）
+// デイリーリセット（全ユーザー対象）
 export async function resetDaily() {
-  await query('UPDATE coins SET last_daily=NULL');
+  await query('TRUNCATE daily_claims');
 }
