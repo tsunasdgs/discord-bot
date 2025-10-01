@@ -1,29 +1,35 @@
+// ---------------- index.js ----------------
 import Discord from 'discord.js';
 import pkg from 'pg';
-const { Pool } = pkg;
 import schedule from 'node-schedule';
 import dotenv from 'dotenv';
 import http from 'http';
 
+const { Pool } = pkg;
 dotenv.config();
 
+// ---------------- Env ----------------
 const {
   DISCORD_TOKEN,
+  DATABASE_URL,
   DAILY_CHANNEL_ID,
   ADMIN_CHANNEL_ID,
   LUMMA_CHANNELS,
-  DATABASE_URL,
+  ALLOWED_ROLE_IDS,
   DAILY_AMOUNT = 100,
   MESSAGE_AMOUNT = 10,
-  MESSAGE_LIMIT = 5
+  MESSAGE_LIMIT = 5,
+  PORT = 10000
 } = process.env;
 
-if (!DISCORD_TOKEN) throw new Error('Discord TOKEN が設定されていません');
+if (!DISCORD_TOKEN) throw new Error('DISCORD_TOKEN が設定されていません');
 
-const ALLOWED_LUMMA_CHANNELS = LUMMA_CHANNELS?.split(',').map(c => c.trim()) || [];
+const ALLOWED_LUMMA_CHANNELS = LUMMA_CHANNELS?.split(',').map(c=>c.trim()) || [];
+const ALLOWED_ROLES = ALLOWED_ROLE_IDS?.split(',').map(r=>r.trim()) || [];
 const DAILY_AMOUNT_NUM = Number(DAILY_AMOUNT);
 const MESSAGE_AMOUNT_NUM = Number(MESSAGE_AMOUNT);
 const MESSAGE_LIMIT_NUM = Number(MESSAGE_LIMIT);
+
 const FORBIDDEN_WORDS = ['ああ','いい','AA'];
 const MESSAGE_COOLDOWN_MS = 60000;
 
@@ -56,16 +62,16 @@ async function initDB() {
       id SERIAL PRIMARY KEY, race_id INT, user_id TEXT, horse_name TEXT, bet_amount INT
     );`
   ];
-  for (const q of tables) await pool.query(q);
+  for(const q of tables) await pool.query(q);
 }
 initDB().catch(console.error);
 
 // ---------------- Helper ----------------
 const getUser = async (userId) => {
-  const res = await pool.query('SELECT * FROM coins WHERE user_id=$1', [userId]);
-  if (!res.rows.length) {
-    await pool.query('INSERT INTO coins(user_id) VALUES($1)', [userId]);
-    return { user_id: userId, balance: 0 };
+  const res = await pool.query('SELECT * FROM coins WHERE user_id=$1',[userId]);
+  if(!res.rows.length){
+    await pool.query('INSERT INTO coins(user_id) VALUES($1)',[userId]);
+    return { user_id: userId, balance:0 };
   }
   return res.rows[0];
 };
@@ -73,8 +79,8 @@ const getUser = async (userId) => {
 const updateCoins = async (userId, amount, type='manual', note='') => {
   const user = await getUser(userId);
   const newBalance = user.balance + amount;
-  await pool.query('UPDATE coins SET balance=$1 WHERE user_id=$2', [newBalance, userId]);
-  await pool.query('INSERT INTO history(user_id,type,amount,note) VALUES($1,$2,$3,$4)', [userId,type,amount,note]);
+  await pool.query('UPDATE coins SET balance=$1 WHERE user_id=$2',[newBalance,userId]);
+  await pool.query('INSERT INTO history(user_id,type,amount,note) VALUES($1,$2,$3,$4)',[userId,type,amount,note]);
   return newBalance;
 };
 
@@ -86,6 +92,11 @@ const createFieldEmbed = (title, fields, color='Blue') =>
 
 const createRow = (components) => new Discord.ActionRowBuilder().addComponents(components);
 
+const checkRole = async (member) => {
+  if(!ALLOWED_ROLES.length) return true; // 設定なしなら制限なし
+  return member.roles.cache.some(r=>ALLOWED_ROLES.includes(r.id));
+};
+
 // ---------------- Scheduled Tasks ----------------
 schedule.scheduleJob('0 5 * * *', async () => {
   await pool.query('UPDATE daily_claims SET last_claim=NULL');
@@ -95,47 +106,39 @@ schedule.scheduleJob('0 5 * * *', async () => {
 // ---------------- Message Reward ----------------
 const spamCooldown = {};
 client.on('messageCreate', async (msg) => {
-  if (msg.author.bot) return;
+  if(msg.author.bot) return;
   const content = msg.content.replace(/\s/g,'');
-  if (FORBIDDEN_WORDS.some(f => content.includes(f))) return;
+  if(FORBIDDEN_WORDS.some(f=>content.includes(f))) return;
 
   const now = Date.now();
-  if (now - (spamCooldown[msg.author.id] || 0) < MESSAGE_COOLDOWN_MS) return;
+  if(now - (spamCooldown[msg.author.id]||0) < MESSAGE_COOLDOWN_MS) return;
   spamCooldown[msg.author.id] = now;
 
-  const countRes = await pool.query(
-    'SELECT COUNT(*) FROM history WHERE user_id=$1 AND type=$2 AND created_at::date=CURRENT_DATE',
-    [msg.author.id, 'message']
-  );
-  if (countRes.rows[0].count >= MESSAGE_LIMIT_NUM) return;
+  const countRes = await pool.query('SELECT COUNT(*) FROM history WHERE user_id=$1 AND type=$2 AND created_at::date=CURRENT_DATE',[msg.author.id,'message']);
+  if(countRes.rows[0].count >= MESSAGE_LIMIT_NUM) return;
 
-  await updateCoins(msg.author.id, MESSAGE_AMOUNT_NUM, 'message', '発言報酬');
+  await updateCoins(msg.author.id, MESSAGE_AMOUNT_NUM,'message','発言報酬');
 });
 
 // ---------------- ルムマ Helper ----------------
 const calculateOdds = async (raceId) => {
-  const betsRes = await pool.query(
-    'SELECT horse_name, SUM(bet_amount) as total FROM lumma_bets WHERE race_id=$1 GROUP BY horse_name',
-    [raceId]
-  );
+  const betsRes = await pool.query('SELECT horse_name, SUM(bet_amount) as total FROM lumma_bets WHERE race_id=$1 GROUP BY horse_name',[raceId]);
   const totalPool = betsRes.rows.reduce((sum,row)=> sum + Number(row.total),0);
   const odds = {};
-  for(const row of betsRes.rows){
-    odds[row.horse_name] = totalPool / Number(row.total);
-  }
+  for(const row of betsRes.rows) odds[row.horse_name] = totalPool / Number(row.total);
   return odds;
 };
 
 const payWinners = async (raceId, winnerHorse) => {
-  const betsRes = await pool.query('SELECT * FROM lumma_bets WHERE race_id=$1', [raceId]);
-  const totalPool = betsRes.rows.reduce((sum,row)=> sum + row.bet_amount,0);
+  const betsRes = await pool.query('SELECT * FROM lumma_bets WHERE race_id=$1',[raceId]);
+  const totalPool = betsRes.rows.reduce((sum,row)=> sum+row.bet_amount,0);
   const winnerBets = betsRes.rows.filter(b=>b.horse_name===winnerHorse);
-  const totalWinnerBets = winnerBets.reduce((sum,row)=> sum + row.bet_amount,0);
+  const totalWinnerBets = winnerBets.reduce((sum,row)=> sum+row.bet_amount,0);
   for(const bet of winnerBets){
     const payout = Math.floor(bet.bet_amount / totalWinnerBets * totalPool);
-    await updateCoins(bet.user_id, payout, 'lumma_win', `ルムマ勝利: ${winnerHorse} (${payout}S)`);
+    await updateCoins(bet.user_id,payout,'lumma_win',`ルムマ勝利: ${winnerHorse} (${payout}S)`);
   }
-  await pool.query('UPDATE lumma_races SET is_closed=true, winner=$1 WHERE id=$2', [winnerHorse,raceId]);
+  await pool.query('UPDATE lumma_races SET is_closed=true, winner=$1 WHERE id=$2',[winnerHorse,raceId]);
 };
 
 // ---------------- UI ----------------
@@ -144,14 +147,14 @@ const mainMenu = () => createRow([
     .setCustomId('main_menu')
     .setPlaceholder('操作を選択してください')
     .addOptions([
-      { label: '💰 デイリー報酬', value: 'daily' },
-      { label: '📊 残高確認', value: 'check_balance' },
-      { label: '📜 履歴確認', value: 'check_history' },
-      { label: '🏇 ルムマ作成', value: 'lumma_create' },
-      { label: '📋 ルムマ一覧', value: 'lumma_list' },
-      { label: '🎯 馬に賭ける', value: 'lumma_bet' },
-      { label: '🏆 勝者報告', value: 'lumma_close' },
-      { label: '🎫 自分の賭け状況', value: 'lumma_my_bets' },
+      { label:'💰 デイリー報酬', value:'daily' },
+      { label:'📊 残高確認', value:'check_balance' },
+      { label:'📜 履歴確認', value:'check_history' },
+      { label:'🏇 ルムマ作成', value:'lumma_create' },
+      { label:'📋 ルムマ一覧', value:'lumma_list' },
+      { label:'🎯 馬に賭ける', value:'lumma_bet' },
+      { label:'🏆 勝者報告', value:'lumma_close' },
+      { label:'🎫 自分の賭け状況', value:'lumma_my_bets' },
     ])
 ]);
 
@@ -160,36 +163,50 @@ client.once('ready', async () => {
   console.log(`Logged in as ${client.user.tag}`);
   try {
     const sendUI = async (chId, content, rowFn) => {
-      if (!chId) return;
+      if(!chId) return;
       const ch = await client.channels.fetch(chId.trim());
-      if (ch?.isTextBased()) await ch.send({ content, components:[rowFn()] });
+      if(ch?.isTextBased()) await ch.send({ content, components:[rowFn()] });
     };
-    await sendUI(DAILY_CHANNEL_ID, 'メインメニュー', mainMenu);
-  } catch(e) { console.error('UI送信エラー:', e); }
+    await sendUI(DAILY_CHANNEL_ID,'メインメニュー',mainMenu);
+  } catch(e){ console.error('UI送信エラー:',e); }
 });
 
 // ---------------- Interaction ----------------
 client.on('interactionCreate', async (interaction) => {
   const uid = interaction.user.id;
-  const replyEmbed = (emb) => interaction.reply({ embeds:[emb], ephemeral:true });
+  const member = await interaction.guild.members.fetch(uid);
+  const replyEmbed = (emb)=> interaction.reply({ embeds:[emb], ephemeral:true });
 
-  // メインメニュー
+  // 全ルムマ操作は権限チェック
+  const lummaInteractions = ['lumma_create','lumma_list','lumma_bet','lumma_close','lumma_my_bets'];
+  if((interaction.isStringSelectMenu() && lummaInteractions.includes(interaction.customId)) || 
+     (interaction.isModalSubmit() && interaction.customId.startsWith('lumma_create_modal')) ||
+     (interaction.isStringSelectMenu() && interaction.customId.startsWith('select_race')) ||
+     (interaction.isStringSelectMenu() && interaction.customId.startsWith('bet_')) ||
+     (interaction.isModalSubmit() && interaction.customId.startsWith('bet_amount_')) ||
+     (interaction.isStringSelectMenu() && interaction.customId.startsWith('close_'))){
+    if(!await checkRole(member)){
+      return replyEmbed(createEmbed('権限エラー','この操作は許可ロールが必要です','Red'));
+    }
+  }
+
+  // ---------------- メインメニュー ----------------
   if(interaction.isStringSelectMenu() && interaction.customId==='main_menu'){
     const choice = interaction.values[0];
 
-    // --- デイリー ---
+    // --- デイリー報酬 ---
     if(choice==='daily'){
       const res = await pool.query('SELECT last_claim FROM daily_claims WHERE user_id=$1',[uid]);
       const last = res.rows[0]?.last_claim;
       if(last && new Date(last).toDateString()===new Date().toDateString())
         return replyEmbed(createEmbed('通知','今日のデイリーは取得済み'));
-      await updateCoins(uid, DAILY_AMOUNT_NUM, 'daily','デイリー報酬');
+      await updateCoins(uid,DAILY_AMOUNT_NUM,'daily','デイリー報酬');
       await pool.query(`INSERT INTO daily_claims(user_id,last_claim) VALUES($1,CURRENT_DATE)
-                        ON CONFLICT (user_id) DO UPDATE SET last_claim=CURRENT_DATE`, [uid]);
+                        ON CONFLICT (user_id) DO UPDATE SET last_claim=CURRENT_DATE`,[uid]);
       return replyEmbed(createEmbed('デイリー取得',`デイリー ${DAILY_AMOUNT_NUM}S 取得!`,'Green'));
     }
 
-    // --- 残高 ---
+    // --- 残高確認 ---
     if(choice==='check_balance'){
       const user = await getUser(uid);
       return replyEmbed(createFieldEmbed('所持S',[
@@ -198,7 +215,7 @@ client.on('interactionCreate', async (interaction) => {
       ],'Gold'));
     }
 
-    // --- 履歴 ---
+    // --- 履歴確認 ---
     if(choice==='check_history'){
       const res = await pool.query('SELECT * FROM history WHERE user_id=$1 ORDER BY created_at DESC LIMIT 5',[uid]);
       if(!res.rows.length) return replyEmbed(createEmbed('履歴','取引履歴はありません','Grey'));
@@ -209,7 +226,7 @@ client.on('interactionCreate', async (interaction) => {
       return replyEmbed(createFieldEmbed('直近の履歴',fields,'Blue'));
     }
 
-    // --- ルムマ作成 ---
+    // --- ルムマ作成モーダル ---
     if(choice==='lumma_create'){
       const modal = new Discord.ModalBuilder()
         .setCustomId('lumma_create_modal').setTitle('ルムマレース作成')
@@ -224,9 +241,7 @@ client.on('interactionCreate', async (interaction) => {
     if(choice==='lumma_list'){
       const racesRes = await pool.query('SELECT * FROM lumma_races WHERE is_closed=false ORDER BY created_at DESC');
       if(!racesRes.rows.length) return replyEmbed(createEmbed('通知','開催中のレースはありません','Yellow'));
-      const fields = racesRes.rows.map(r=>{
-        return { name:r.race_name, value:`出走馬数: ${r.entrants}`, inline:false };
-      });
+      const fields = racesRes.rows.map(r=>({ name:r.race_name, value:`出走馬数: ${r.entrants}`, inline:false }));
       return replyEmbed(createFieldEmbed('開催中のルムマ',fields,'Purple'));
     }
 
@@ -235,7 +250,7 @@ client.on('interactionCreate', async (interaction) => {
       const myBets = await pool.query('SELECT l.race_name, b.horse_name, b.bet_amount FROM lumma_bets b JOIN lumma_races l ON b.race_id=l.id WHERE b.user_id=$1 AND l.is_closed=false',[uid]);
       if(!myBets.rows.length) return replyEmbed(createEmbed('通知','現在の賭けはありません','Yellow'));
       const fields = myBets.rows.map(r=>({ name:r.race_name, value:`${r.horse_name} に ${r.bet_amount}S`, inline:false }));
-      return replyEmbed(createFieldEmbed('自分の賭け状況', fields, 'Green'));
+      return replyEmbed(createFieldEmbed('自分の賭け状況',fields,'Green'));
     }
 
     // --- 馬に賭ける ---
@@ -271,7 +286,11 @@ client.on('interactionCreate', async (interaction) => {
     const horses = betsRes.rows.map(r=>({ label:r.horse_name, value:r.horse_name }));
     if(!horses.length) return replyEmbed(createEmbed('通知','まだ馬が登録されていません','Yellow'));
 
-    return interaction.reply({ content:`レース: ${race.rows[0].race_name}\nオッズ目安: ${betsRes.rows.map(r=>`${r.horse_name}: ${(totalPool/r.total).toFixed(2)}倍`).join('\n')}`, components:[createRow([new Discord.StringSelectMenuBuilder().setCustomId(`bet_${raceId}`).setPlaceholder('馬を選択').addOptions(horses)])], ephemeral:true });
+    return interaction.reply({
+      content:`レース: ${race.rows[0].race_name}\nオッズ目安: ${betsRes.rows.map(r=>`${r.horse_name}: ${(totalPool/r.total).toFixed(2)}倍`).join('\n')}`,
+      components:[createRow([new Discord.StringSelectMenuBuilder().setCustomId(`bet_${raceId}`).setPlaceholder('馬を選択').addOptions(horses)])],
+      ephemeral:true
+    });
   }
 
   // --- 馬に賭ける処理 ---
@@ -291,14 +310,12 @@ client.on('interactionCreate', async (interaction) => {
     const [_, raceId, horse] = interaction.customId.split('_');
     const amount = parseInt(interaction.fields.getTextInputValue('amount'));
     if(isNaN(amount) || amount<=0) return replyEmbed(createEmbed('エラー','正しい金額を入力してください','Red'));
-
     const user = await getUser(uid);
     if(user.balance < amount) return replyEmbed(createEmbed('エラー','所持コインが足りません','Red'));
 
     await updateCoins(uid,-amount,'lumma_bet',`ルムマ賭け ${horse} ${amount}S`);
     await pool.query('INSERT INTO lumma_bets(race_id,user_id,horse_name,bet_amount) VALUES($1,$2,$3,$4)',
       [raceId, uid, horse, amount]);
-
     return replyEmbed(createEmbed('賭け完了',`${horse} に ${amount}S 賭けました`,'Green'));
   }
 
@@ -306,13 +323,12 @@ client.on('interactionCreate', async (interaction) => {
   if(interaction.isStringSelectMenu() && interaction.customId.startsWith('close_')){
     const raceId = interaction.customId.replace('close_','');
     const winnerHorse = interaction.values[0];
-    await payWinners(raceId, winnerHorse);
+    await payWinners(raceId,winnerHorse);
     return replyEmbed(createEmbed('レース締め完了',`勝者: ${winnerHorse} 配当済`,'Green'));
   }
 });
 
 // ---------------- HTTP Server ----------------
-const PORT = process.env.PORT || 10000;
 http.createServer((req,res)=>{
   res.writeHead(200,{'Content-Type':'text/plain'});
   res.end('Bot is running\n');
