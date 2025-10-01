@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import { Client, GatewayIntentBits } from 'discord.js';
 import { v4 as uuidv4 } from 'uuid';
 import { 
   ActionRowBuilder, ButtonBuilder, ButtonStyle, ModalBuilder,
@@ -6,13 +7,13 @@ import {
   SelectMenuBuilder, InteractionType
 } from 'discord.js';
 
-// .env からチャンネルID読み込み
-const ALLOWED_CHANNELS = [String(process.env.RUMMA_CHANNEL_ID)];
+// 環境変数からチャンネルID取得
+const RUMMA_CHANNEL_ID = process.env.RUMMA_CHANNEL_ID;
 
 let users = {};
 let races = {};
 
-// --- ユーザー情報取得 ---
+// --- ユーザー取得 ---
 function getUser(userId) {
   if (!users[userId]) users[userId] = { balance: 1000 };
   return users[userId];
@@ -120,7 +121,7 @@ export async function sendRaceUI(channel, raceId) {
 
 // --- Interaction Handler ---
 export async function handleInteraction(interaction) {
-  if (!ALLOWED_CHANNELS.includes(interaction.channelId)) return;
+  if (interaction.channelId !== RUMMA_CHANNEL_ID) return;
 
   if (interaction.isButton()) {
     const [action, raceId, horseId] = interaction.customId.split('_');
@@ -188,11 +189,25 @@ export async function handleInteraction(interaction) {
   }
 }
 
-// --- ヘルパー：起動時にテストUIを出す ---
-export async function initTestRace(client) {
-  const channel = client.channels.cache.get(process.env.RUMMA_CHANNEL_ID);
-  if (!channel) return console.log('initTestRace: channel not found');
-  const raceId = createRace('テストレース', client.user.id, ['馬A', '馬B', '馬C']);
-  await sendRaceUI(channel, raceId);
-  return raceId;
+// --- Client初期化とテストUI ---
+export async function initBot() {
+  const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages] });
+
+  client.once('ready', async () => {
+    console.log(`Logged in as ${client.user.tag}`);
+    try {
+      const channel = await client.channels.fetch(RUMMA_CHANNEL_ID);
+      const raceId = createRace('テストレース', client.user.id, ['馬A', '馬B', '馬C']);
+      await sendRaceUI(channel, raceId);
+      console.log('テストUI送信完了');
+    } catch (err) {
+      console.error('initBot error:', err);
+    }
+  });
+
+  client.on('interactionCreate', async (interaction) => {
+    await handleInteraction(interaction);
+  });
+
+  await client.login(process.env.BOT_TOKEN);
 }
