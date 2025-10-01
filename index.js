@@ -1,3 +1,4 @@
+// index.js
 import Discord from 'discord.js';
 import pkg from 'pg';
 import schedule from 'node-schedule';
@@ -21,16 +22,18 @@ const {
 
 if (!DISCORD_TOKEN) throw new Error('DISCORD_TOKEN が設定されていません');
 
+// ---------------- 定数 ----------------
 const ALLOWED_RUMMA_CHANNELS = RUMMA_CHANNELS?.split(',').map(c => c.trim()) || [];
 const DAILY_AMOUNT_NUM = Number(DAILY_AMOUNT);
 const MESSAGE_AMOUNT_NUM = Number(MESSAGE_AMOUNT);
 const MESSAGE_LIMIT_NUM = Number(MESSAGE_LIMIT);
-
 const FORBIDDEN_WORDS = ['ああ','いい','AA'];
 const MESSAGE_COOLDOWN_MS = 60000;
 
+// ---------------- DB接続 ----------------
 const pool = new Pool({ connectionString: DATABASE_URL, ssl: { rejectUnauthorized: false } });
 
+// ---------------- Client ----------------
 const client = new Discord.Client({
   intents: [
     Discord.GatewayIntentBits.Guilds,
@@ -81,8 +84,11 @@ const updateCoins = async (userId, amount, type='manual', note='') => {
 };
 
 // ---------------- Embeds / UI ----------------
-const createEmbed = (title, desc, color='Blue') => new Discord.EmbedBuilder().setTitle(title).setDescription(desc).setColor(color);
-const createFieldEmbed = (title, fields, color='Blue') => new Discord.EmbedBuilder().setTitle(title).addFields(fields).setColor(color);
+const createEmbed = (title, desc, color='Blue') =>
+  new Discord.EmbedBuilder().setTitle(title).setDescription(desc).setColor(color);
+
+const createFieldEmbed = (title, fields, color='Blue') =>
+  new Discord.EmbedBuilder().setTitle(title).addFields(fields).setColor(color);
 
 const dailyButtons = () => new Discord.ActionRowBuilder().addComponents([
   new Discord.ButtonBuilder().setCustomId('daily_claim').setLabel('💰 デイリー取得').setStyle(Discord.ButtonStyle.Primary),
@@ -130,56 +136,39 @@ client.on('messageCreate', async (msg) => {
 
 // ---------------- Ready ----------------
 client.once('ready', async () => {
-  console.log(`Logged in as ${client.user.tag}`);
+  console.log(`✅ Logged in as ${client.user.tag}`);
   try {
-    // デイリーUI
     if (DAILY_CHANNEL_ID) {
       const ch = await client.channels.fetch(DAILY_CHANNEL_ID);
-      if (ch?.isTextBased()) {
-        await ch.send({ content:'💰 デイリー操作', components:[dailyButtons()] });
-      }
+      if (ch?.isTextBased()) await ch.send({ content:'💰 デイリー操作', components:[dailyButtons()] });
     }
-
-    // ルムマUI
     for (const cid of ALLOWED_RUMMA_CHANNELS) {
       const ch = await client.channels.fetch(cid);
-      if (ch?.isTextBased()) {
-        await ch.send({ content:'🏇 ルムマ操作', components:[lummaButtons()] });
-      }
+      if (ch?.isTextBased()) await ch.send({ content:'🏇 ルムマ操作', components:[lummaButtons()] });
     }
-
-    // 管理UI
     if (ADMIN_CHANNEL_ID) {
       const ch = await client.channels.fetch(ADMIN_CHANNEL_ID);
-      if (ch?.isTextBased()) {
-        await ch.send({ content:'⚙ 管理操作', components:[adminButtons()] });
-      }
+      if (ch?.isTextBased()) await ch.send({ content:'⚙ 管理操作', components:[adminButtons()] });
     }
-
   } catch(e){ console.error('UI送信エラー:', e); }
 });
 
 // ---------------- Interaction ----------------
 client.on('interactionCreate', async (interaction) => {
   const uid = interaction.user.id;
-  const replyEmbed = async (emb) => {
-    try {
-      if(interaction.deferred || interaction.replied){
-        await interaction.editReply({ embeds:[emb] }).catch(()=>{});
-      } else {
-        await interaction.reply({ embeds:[emb], flags: Discord.MessageFlags.Ephemeral }).catch(()=>{});
-      }
-    } catch {}
-  };
 
   try {
+    // ===== ボタン =====
     if(interaction.isButton()){
-      await interaction.deferReply({ flags: Discord.MessageFlags.Ephemeral });
+      // モーダル表示するボタンは defer 不要
+      if(!['lumma_create','lumma_bet','adjust_coins'].includes(interaction.customId)){
+        if(!interaction.deferred && !interaction.replied){
+          await interaction.deferReply({ flags: Discord.MessageFlags.Ephemeral });
+        }
+      }
 
-      const { customId } = interaction;
-
-      // ---------- デイリー ----------
-      if(customId === 'daily_claim'){
+      // デイリー
+      if(interaction.customId==='daily_claim'){
         const res = await pool.query('SELECT last_claim FROM daily_claims WHERE user_id=$1',[uid]);
         const last = res.rows[0]?.last_claim;
         if(last && new Date(last).toDateString()===new Date().toDateString())
@@ -191,87 +180,64 @@ client.on('interactionCreate', async (interaction) => {
         return interaction.editReply({ embeds:[createEmbed('デイリー取得',`デイリー ${DAILY_AMOUNT_NUM}S 取得!`,'Green')] });
       }
 
-      if(customId==='check_balance'){
+      if(interaction.customId==='check_balance'){
         const user = await getUser(uid);
-        return replyEmbed(createFieldEmbed('所持S', [{ name:'残高', value:`${user.balance}S`, inline:true }], 'Gold'));
+        return interaction.editReply({ embeds:[createFieldEmbed('所持S',[{name:'残高',value:`${user.balance}S`}],'Gold')] });
       }
 
-      if(customId==='check_history'){
+      if(interaction.customId==='check_history'){
         const res = await pool.query(
           `SELECT * FROM history WHERE user_id=$1 AND created_at > now() - interval '7 days' ORDER BY created_at DESC LIMIT 20`,
           [uid]
         );
-        if(!res.rows.length) return replyEmbed(createEmbed('履歴','過去1週間の取引履歴はありません','Grey'));
+        if(!res.rows.length) return interaction.editReply({ embeds:[createEmbed('履歴','過去1週間の履歴なし','Grey')] });
         const fields = res.rows.map(r => ({ name: `${r.type} (${r.amount>0?'+':''}${r.amount}S)`, value: `${r.note||''} - ${new Date(r.created_at).toLocaleString()}` }));
-        return replyEmbed(createFieldEmbed('直近の履歴', fields,'Blue'));
+        return interaction.editReply({ embeds:[createFieldEmbed('直近の履歴', fields,'Blue')] });
       }
 
-      // ---------- ルムマ ----------
-      if(customId==='lumma_create'){
+      // ルムマモーダル
+      if(interaction.customId==='lumma_create'){
         const modal = new Discord.ModalBuilder()
           .setCustomId('lumma_create_modal')
           .setTitle('ルムマ作成')
           .addComponents(
             new Discord.ActionRowBuilder().addComponents(
-              new Discord.TextInputBuilder()
-                .setCustomId('race_name')
-                .setLabel('レース名')
-                .setStyle(Discord.TextInputStyle.Short)
-                .setRequired(true)
+              new Discord.TextInputBuilder().setCustomId('race_name').setLabel('レース名').setStyle(Discord.TextInputStyle.Short).setRequired(true)
             ),
             new Discord.ActionRowBuilder().addComponents(
-              new Discord.TextInputBuilder()
-                .setCustomId('horses')
-                .setLabel('ウマ名をカンマ区切りで入力 (2-18頭)')
-                .setStyle(Discord.TextInputStyle.Paragraph)
-                .setRequired(true)
+              new Discord.TextInputBuilder().setCustomId('horses').setLabel('ウマ名をカンマ区切りで入力 (2-18頭)').setStyle(Discord.TextInputStyle.Paragraph).setRequired(true)
             )
           );
         return interaction.showModal(modal);
       }
 
-      if(customId==='lumma_list'){
+      if(interaction.customId==='lumma_list'){
         const res = await pool.query('SELECT * FROM lumma_races WHERE is_closed=false ORDER BY created_at DESC LIMIT 10');
-        if(!res.rows.length) return replyEmbed(createEmbed('レース一覧','現在開催中のレースはありません','Grey'));
-        const fields = res.rows.map(r => ({
-          name: r.race_name,
-          value: `ホスト: <@${r.host_id}>, 出走ウマ: ${r.horses.join(', ')}`
-        }));
-        return replyEmbed(createFieldEmbed('開催中レース', fields,'Blue'));
+        if(!res.rows.length) return interaction.editReply({ embeds:[createEmbed('レース一覧','開催中なし','Grey')] });
+        const fields = res.rows.map(r => ({ name: r.race_name, value: `ホスト:<@${r.host_id}>\n出走:${r.horses.join(', ')}` }));
+        return interaction.editReply({ embeds:[createFieldEmbed('開催中レース', fields,'Blue')] });
       }
 
-      if(customId==='lumma_bet'){
+      if(interaction.customId==='lumma_bet'){
         const modal = new Discord.ModalBuilder()
           .setCustomId('lumma_bet_modal')
           .setTitle('ウマに賭ける')
           .addComponents(
             new Discord.ActionRowBuilder().addComponents(
-              new Discord.TextInputBuilder()
-                .setCustomId('race_id')
-                .setLabel('レースID')
-                .setStyle(Discord.TextInputStyle.Short)
-                .setRequired(true)
+              new Discord.TextInputBuilder().setCustomId('race_id').setLabel('レースID').setStyle(Discord.TextInputStyle.Short).setRequired(true)
             ),
             new Discord.ActionRowBuilder().addComponents(
-              new Discord.TextInputBuilder()
-                .setCustomId('horse_name')
-                .setLabel('ウマ名')
-                .setStyle(Discord.TextInputStyle.Short)
-                .setRequired(true)
+              new Discord.TextInputBuilder().setCustomId('horse_name').setLabel('ウマ名').setStyle(Discord.TextInputStyle.Short).setRequired(true)
             ),
             new Discord.ActionRowBuilder().addComponents(
-              new Discord.TextInputBuilder()
-                .setCustomId('bet_amount')
-                .setLabel('賭け金')
-                .setStyle(Discord.TextInputStyle.Short)
-                .setRequired(true)
+              new Discord.TextInputBuilder().setCustomId('bet_amount').setLabel('賭け金').setStyle(Discord.TextInputStyle.Short).setRequired(true)
             )
           );
         return interaction.showModal(modal);
       }
 
-      // ---------- 管理 ----------
-      if(customId==='adjust_coins'){
+      // 管理モーダル
+      if(interaction.customId==='adjust_coins'){
         const modal = new Discord.ModalBuilder()
           .setCustomId('adjust_coins_modal')
           .setTitle('ユーザーコイン増減')
@@ -286,27 +252,56 @@ client.on('interactionCreate', async (interaction) => {
         return interaction.showModal(modal);
       }
 
-      if(customId==='history_all'){
+      if(interaction.customId==='history_all'){
         const res = await pool.query(
           `SELECT * FROM history WHERE created_at > now() - interval '7 days' ORDER BY created_at DESC LIMIT 50`
         );
-        if(!res.rows.length) return replyEmbed(createEmbed('全員履歴','過去1週間の取引履歴はありません','Grey'));
-        const fields = res.rows.map(r => ({
-          name: `<@${r.user_id}>: ${r.type} (${r.amount>0?'+':''}${r.amount}S)`,
-          value: r.note || ''
-        }));
-        return replyEmbed(createFieldEmbed('全員履歴', fields,'Blue'));
+        if(!res.rows.length) return interaction.editReply({ embeds:[createEmbed('全員履歴','過去1週間の履歴なし','Grey')] });
+        const fields = res.rows.map(r => ({ name:`<@${r.user_id}> ${r.type} (${r.amount>0?'+':''}${r.amount}S)`, value:r.note||'' }));
+        return interaction.editReply({ embeds:[createFieldEmbed('全員履歴',fields,'Blue')] });
       }
     }
 
-    // ---------- モーダル送信処理 ----------
+    // ===== モーダル =====
     if(interaction.isModalSubmit()){
-      // モーダル送信処理は元コードを保持
+      if(interaction.customId==='lumma_create_modal'){
+        const raceName = interaction.fields.getTextInputValue('race_name');
+        const horses = interaction.fields.getTextInputValue('horses').split(',').map(h=>h.trim()).filter(h=>h);
+        if(horses.length<2 || horses.length>18){
+          return interaction.reply({ embeds:[createEmbed('エラー','ウマは2〜18頭で入力してください','Red')], flags: Discord.MessageFlags.Ephemeral });
+        }
+        await pool.query('INSERT INTO lumma_races(channel_id,host_id,race_name,horses) VALUES($1,$2,$3,$4)', [interaction.channelId, interaction.user.id, raceName, horses]);
+        return interaction.reply({ embeds:[createEmbed('ルムマ作成完了',`レース:${raceName}\n出走:${horses.join(', ')}`,'Green')], flags: Discord.MessageFlags.Ephemeral });
+      }
+
+      if(interaction.customId==='lumma_bet_modal'){
+        const raceId = interaction.fields.getTextInputValue('race_id');
+        const horse = interaction.fields.getTextInputValue('horse_name');
+        const bet = parseInt(interaction.fields.getTextInputValue('bet_amount'));
+        const raceRes = await pool.query('SELECT * FROM lumma_races WHERE id=$1 AND is_closed=false',[raceId]);
+        if(!raceRes.rows.length) return interaction.reply({ embeds:[createEmbed('エラー','レースが存在しません','Red')], flags: Discord.MessageFlags.Ephemeral });
+
+        const user = await getUser(uid);
+        if(user.balance<bet) return interaction.reply({ embeds:[createEmbed('エラー','残高不足','Red')], flags: Discord.MessageFlags.Ephemeral });
+
+        await updateCoins(uid,-bet,'bet',`Race#${raceId}:${horse}`);
+        await pool.query('INSERT INTO lumma_bets(race_id,user_id,horse_name,bet_amount) VALUES($1,$2,$3,$4)',[raceId,uid,horse,bet]);
+        return interaction.reply({ embeds:[createEmbed('ベット完了',`Race#${raceId}\n${horse} に ${bet}S 賭けました`,'Green')], flags: Discord.MessageFlags.Ephemeral });
+      }
+
+      if(interaction.customId==='adjust_coins_modal'){
+        const target = interaction.fields.getTextInputValue('target_user');
+        const amount = parseInt(interaction.fields.getTextInputValue('amount'));
+        const newBalance = await updateCoins(target,amount,'admin_adjust',`管理者:${uid}`);
+        return interaction.reply({ embeds:[createEmbed('管理操作完了',`<@${target}> の残高: ${newBalance}S`,'Green')], flags: Discord.MessageFlags.Ephemeral });
+      }
     }
 
   } catch(err){
     console.error('interaction error:', err);
-    try { if(!interaction.replied) await interaction.reply({ embeds:[createEmbed('エラー','内部エラーが発生しました','Red')], flags: Discord.MessageFlags.Ephemeral }); } catch {}
+    if(interaction.isRepliable()){
+      await interaction.reply({ embeds:[createEmbed('エラー','内部エラーが発生しました','Red')], flags: Discord.MessageFlags.Ephemeral }).catch(()=>{});
+    }
   }
 });
 
