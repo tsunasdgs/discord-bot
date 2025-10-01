@@ -18,10 +18,5 @@ export const adminButtons = () => new Discord.ActionRowBuilder().addComponents([
   new Discord.ButtonBuilder().setCustomId('history_all').setLabel('📜 全員取引履歴').setStyle(Discord.ButtonStyle.Secondary)
 ]);
 
-export const createEmbed = (title, description, color='Blue') => {
-  return new Discord.EmbedBuilder().setTitle(title).setDescription(description).setColor(color);
-};
-
-export const createFieldEmbed = (title, fields, color='Blue') => {
-  return new Discord.EmbedBuilder().setTitle(title).addFields(fields).setColor(color);
-};
+export const createEmbed = (title, description, color='Blue') => new Discord.EmbedBuilder().setTitle(title).setDescription(description).setColor(color);
+export const createFieldEmbed = (title, fields, color='Blue') => new Discord.EmbedBuilder().setTitle(title).addFields(fields).setColor(color);

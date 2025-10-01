@@ -22,9 +22,7 @@ export async function handleDaily(interaction, amount){
       INSERT INTO coins(user_id,balance) VALUES($1,$2)
       ON CONFLICT(user_id) DO UPDATE SET balance=coins.balance+$2
     `,[uid, amount]);
-    await pool.query(`
-      INSERT INTO history(user_id,type,amount,note) VALUES($1,'daily',$2,'デイリー報酬')
-    `,[uid, amount]);
+    await pool.query(`INSERT INTO history(user_id,type,amount,note) VALUES($1,'daily',$2,'デイリー報酬')`,[uid, amount]);
     await pool.query(`
       INSERT INTO daily_claims(user_id,last_claim) VALUES($1,CURRENT_DATE)
       ON CONFLICT(user_id) DO UPDATE SET last_claim=CURRENT_DATE

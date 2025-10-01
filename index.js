@@ -9,7 +9,11 @@ import { dailyButtons, lummaButtons, adminButtons } from './ui.js';
 dotenv.config();
 
 const client = new Discord.Client({
-  intents: [Discord.GatewayIntentBits.Guilds, Discord.GatewayIntentBits.GuildMessages, Discord.GatewayIntentBits.MessageContent]
+  intents: [
+    Discord.GatewayIntentBits.Guilds,
+    Discord.GatewayIntentBits.GuildMessages,
+    Discord.GatewayIntentBits.MessageContent
+  ]
 });
 
 const { DAILY_CHANNEL_ID, ADMIN_CHANNEL_ID, RUMMA_CHANNELS, PORT=10000 } = process.env;
@@ -46,9 +50,8 @@ client.on('interactionCreate', async interaction=>{
     }
 
     if(interaction.isModalSubmit()){
-      // モーダル送信処理も同様に安全に deferReply + DB操作
+      // モーダル送信も安全に defer + DB操作
     }
-
   }catch(e){
     console.error('interaction error:', e);
     if(!interaction.replied) await interaction.reply({ embeds:[Coin.createEmbed('エラー','内部エラー','Red')], flags: Discord.MessageFlags.Ephemeral });
