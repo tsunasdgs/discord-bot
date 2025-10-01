@@ -1,12 +1,12 @@
-import 'dotenv/config';  // .env を読み込む
+import 'dotenv/config';
 import { v4 as uuidv4 } from 'uuid';
 import { 
-  ActionRowBuilder, ButtonBuilder, ButtonStyle, ModalBuilder, 
-  TextInputBuilder, TextInputStyle, EmbedBuilder, 
-  SelectMenuBuilder, InteractionType 
+  ActionRowBuilder, ButtonBuilder, ButtonStyle, ModalBuilder,
+  TextInputBuilder, TextInputStyle, EmbedBuilder,
+  SelectMenuBuilder, InteractionType
 } from 'discord.js';
 
-// 確実に文字列にする
+// .env からチャンネルID読み込み
 const ALLOWED_CHANNELS = [String(process.env.RUMMA_CHANNEL_ID)];
 
 let users = {};
@@ -57,7 +57,7 @@ export function createRace(name, hostId, horseNames) {
   return raceId;
 }
 
-// --- UI送信関数 ---
+// --- レースUI送信 ---
 export async function sendRaceUI(channel, raceId) {
   const race = races[raceId];
   if (!race) return console.log('sendRaceUI: race not found', raceId);
@@ -122,7 +122,6 @@ export async function sendRaceUI(channel, raceId) {
 export async function handleInteraction(interaction) {
   if (!ALLOWED_CHANNELS.includes(interaction.channelId)) return;
 
-  // --- ボタン ---
   if (interaction.isButton()) {
     const [action, raceId, horseId] = interaction.customId.split('_');
     const race = races[raceId];
@@ -160,7 +159,6 @@ export async function handleInteraction(interaction) {
     }
   }
 
-  // --- モーダル（投票） ---
   if (interaction.type === InteractionType.ModalSubmit && interaction.customId.startsWith('bet_modal')) {
     const [_, raceId, horseId] = interaction.customId.split('_').slice(1);
     const race = races[raceId];
@@ -177,7 +175,6 @@ export async function handleInteraction(interaction) {
     return interaction.reply({ content: '投票完了！', ephemeral: true });
   }
 
-  // --- 勝者セレクト ---
   if (interaction.isStringSelectMenu() && interaction.customId.startsWith('winner_select')) {
     const raceId = interaction.customId.split('_')[2];
     const winnerId = interaction.values[0];
@@ -189,4 +186,13 @@ export async function handleInteraction(interaction) {
     await sendRaceUI(interaction.channel, raceId);
     return interaction.update({ content: '勝者確定！', components: [] });
   }
+}
+
+// --- ヘルパー：起動時にテストUIを出す ---
+export async function initTestRace(client) {
+  const channel = client.channels.cache.get(process.env.RUMMA_CHANNEL_ID);
+  if (!channel) return console.log('initTestRace: channel not found');
+  const raceId = createRace('テストレース', client.user.id, ['馬A', '馬B', '馬C']);
+  await sendRaceUI(channel, raceId);
+  return raceId;
 }
