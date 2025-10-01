@@ -1,3 +1,4 @@
+import 'dotenv/config';  // .env を読み込む
 import { v4 as uuidv4 } from 'uuid';
 import { 
   ActionRowBuilder, ButtonBuilder, ButtonStyle, ModalBuilder, 
@@ -5,16 +6,19 @@ import {
   SelectMenuBuilder, InteractionType 
 } from 'discord.js';
 
-const ALLOWED_CHANNELS = [process.env.RUMMA_CHANNEL_ID];
+// 確実に文字列にする
+const ALLOWED_CHANNELS = [String(process.env.RUMMA_CHANNEL_ID)];
 
-let users = {}; 
-let races = {}; 
+let users = {};
+let races = {};
 
+// --- ユーザー情報取得 ---
 function getUser(userId) {
   if (!users[userId]) users[userId] = { balance: 1000 };
   return users[userId];
 }
 
+// --- オッズ計算 ---
 function calculateOdds(race) {
   const total = race.bets.reduce((sum, b) => sum + b.amount, 0);
   const horseTotals = {};
@@ -25,6 +29,7 @@ function calculateOdds(race) {
   return odds;
 }
 
+// --- 配当分配 ---
 function distributeWinnings(race, winnerId) {
   const odds = calculateOdds(race);
   race.bets.forEach(b => {
@@ -52,10 +57,10 @@ export function createRace(name, hostId, horseNames) {
   return raceId;
 }
 
-// --- Embed更新（投票中／締切／結果） ---
-export async function updateRaceEmbed(channel, raceId) {
+// --- UI送信関数 ---
+export async function sendRaceUI(channel, raceId) {
   const race = races[raceId];
-  if (!race) return;
+  if (!race) return console.log('sendRaceUI: race not found', raceId);
 
   const odds = calculateOdds(race);
   let description = race.horses.map(h => {
@@ -81,27 +86,35 @@ export async function updateRaceEmbed(channel, raceId) {
     const betRow = new ActionRowBuilder();
     race.horses.forEach(h => {
       betRow.addComponents(
-        new ButtonBuilder().setCustomId(`bet_${raceId}_${h.id}`).setLabel(`単勝: ${h.name}`).setStyle(ButtonStyle.Primary)
+        new ButtonBuilder()
+          .setCustomId(`bet_${raceId}_${h.id}`)
+          .setLabel(`単勝: ${h.name}`)
+          .setStyle(ButtonStyle.Primary)
       );
     });
     const controlRow = new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId(`close_${raceId}`).setLabel('投票締切').setStyle(ButtonStyle.Danger),
-      new ButtonBuilder().setCustomId(`declare_${raceId}`).setLabel('勝者宣言').setStyle(ButtonStyle.Success)
+      new ButtonBuilder()
+        .setCustomId(`close_${raceId}`)
+        .setLabel('投票締切')
+        .setStyle(ButtonStyle.Danger),
+      new ButtonBuilder()
+        .setCustomId(`declare_${raceId}`)
+        .setLabel('勝者宣言')
+        .setStyle(ButtonStyle.Success)
     );
     components.push(betRow, controlRow);
   }
 
-  if (race.messageId) {
-    try {
+  try {
+    if (race.messageId) {
       const msg = await channel.messages.fetch(race.messageId);
       await msg.edit({ embeds: [embed], components });
-    } catch {
+    } else {
       const msg = await channel.send({ embeds: [embed], components });
       race.messageId = msg.id;
     }
-  } else {
-    const msg = await channel.send({ embeds: [embed], components });
-    race.messageId = msg.id;
+  } catch (err) {
+    console.error('sendRaceUI error:', err);
   }
 }
 
@@ -121,7 +134,11 @@ export async function handleInteraction(interaction) {
         .setCustomId(`bet_modal_${raceId}_${horseId}`)
         .setTitle(`単勝: ${race.horses.find(h => h.id === horseId)?.name}`)
         .addComponents(new ActionRowBuilder().addComponents(
-          new TextInputBuilder().setCustomId('amount').setLabel('投票金額(S)').setStyle(TextInputStyle.Short).setRequired(true)
+          new TextInputBuilder()
+            .setCustomId('amount')
+            .setLabel('投票金額(S)')
+            .setStyle(TextInputStyle.Short)
+            .setRequired(true)
         ));
       return interaction.showModal(modal);
     }
@@ -129,7 +146,7 @@ export async function handleInteraction(interaction) {
     if (action === 'close') {
       if (interaction.user.id !== race.hostId) return interaction.reply({ content: '部屋建てユーザーのみ締切可能です。', ephemeral: true });
       race.status = 'closed';
-      await updateRaceEmbed(interaction.channel, raceId);
+      await sendRaceUI(interaction.channel, raceId);
       return interaction.reply({ content: '投票を締切ました。', ephemeral: false });
     }
 
@@ -156,7 +173,7 @@ export async function handleInteraction(interaction) {
 
     user.balance -= amount;
     race.bets.push({ userId: interaction.user.id, horseId, amount, payout: 0 });
-    await updateRaceEmbed(interaction.channel, raceId);
+    await sendRaceUI(interaction.channel, raceId);
     return interaction.reply({ content: '投票完了！', ephemeral: true });
   }
 
@@ -169,7 +186,7 @@ export async function handleInteraction(interaction) {
 
     distributeWinnings(race, winnerId);
     race.status = 'finished';
-    await updateRaceEmbed(interaction.channel, raceId);
+    await sendRaceUI(interaction.channel, raceId);
     return interaction.update({ content: '勝者確定！', components: [] });
   }
 }
