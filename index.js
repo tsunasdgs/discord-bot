@@ -2,9 +2,9 @@
 import 'dotenv/config';
 import express from 'express';
 import { 
-  Client, GatewayIntentBits, 
-  ActionRowBuilder, ButtonBuilder, ButtonStyle, 
-  EmbedBuilder, ModalBuilder, TextInputBuilder, TextInputStyle 
+  Client, GatewayIntentBits,
+  ActionRowBuilder, ButtonBuilder, ButtonStyle,
+  EmbedBuilder, ModalBuilder, TextInputBuilder, TextInputStyle, InteractionType, SelectMenuBuilder
 } from 'discord.js';
 import schedule from 'node-schedule';
 import * as coin from './coin.js';
@@ -78,13 +78,9 @@ client.on('interactionCreate', async interaction => {
   try {
     // デイリー
     if (interaction.isButton() && interaction.customId === 'daily') {
-      if (interaction.channelId !== DAILY_CHANNEL_ID) {
-        return safeReply(interaction, 'このチャンネルでは使用できません', true, 5);
-      }
+      if (interaction.channelId !== DAILY_CHANNEL_ID) return safeReply(interaction, 'このチャンネルでは使用できません', true, 5);
       const claimed = await coin.claimDaily(interaction.user.id);
-      const message = claimed 
-        ? `デイリー取得: ${process.env.DAILY_AMOUNT}S` 
-        : '今日のデイリーは取得済み';
+      const message = claimed ? `デイリー取得: ${process.env.DAILY_AMOUNT}S` : '今日のデイリーは取得済み';
       return safeReply(interaction, message, false, 5);
     }
 
@@ -123,13 +119,14 @@ client.on('interactionCreate', async interaction => {
     }
 
     // モーダル提出
-    if (interaction.isModalSubmit() && interaction.customId === 'adjust_modal') {
-      const targetId = interaction.fields.getTextInputValue('target_user');
-      const amount = parseInt(interaction.fields.getTextInputValue('amount'));
-      if (isNaN(amount)) return safeReply(interaction, '数値を入力してください', true, 5);
-
-      await coin.updateCoins(targetId, amount, 'admin', `管理者操作 by ${interaction.user.id}`);
-      return safeReply(interaction, `ユーザー ${targetId} の所持Sを更新しました`, false, 5);
+    if (interaction.isModalSubmit()) {
+      if (interaction.customId === 'adjust_modal') {
+        const targetId = interaction.fields.getTextInputValue('target_user');
+        const amount = parseInt(interaction.fields.getTextInputValue('amount'));
+        if (isNaN(amount)) return safeReply(interaction, '数値を入力してください', true, 5);
+        await coin.updateCoins(targetId, amount, 'admin', `管理者操作 by ${interaction.user.id}`);
+        return safeReply(interaction, `ユーザー ${targetId} の所持Sを更新しました`, false, 5);
+      }
     }
 
     // 取引履歴
@@ -146,7 +143,12 @@ client.on('interactionCreate', async interaction => {
     if (interaction.isChatInputCommand()) {
       if (interaction.commandName.startsWith('uma')) await uma.handleCommand(interaction);
       if (interaction.commandName.startsWith('gacha')) await gacha.handleCommand(interaction);
-      if (interaction.commandName.startsWith('rumma')) await rumma.handleCommand(interaction);
+      if (interaction.commandName.startsWith('rumma')) await rumma.handleCommand(interaction, coin);
+    }
+
+    // ルムマのボタン・モーダル・セレクト処理
+    if (interaction.isButton() || interaction.isSelectMenu() || interaction.type === InteractionType.ModalSubmit) {
+      await rumma.handleInteraction(interaction, coin);
     }
 
   } catch (err) {
@@ -163,34 +165,20 @@ client.on('messageCreate', async message => {
 });
 
 // ----- 安全なreply関数 -----
-// deleteAfterSec: 秒後に自動削除（0 または未指定で削除なし）
 async function safeReply(interaction, contentOrEmbed, ephemeral = false, deleteAfterSec = 0) {
   try {
     let sentMessage;
-
     if (interaction.replied || interaction.deferred) {
-      if (contentOrEmbed instanceof EmbedBuilder) {
-        sentMessage = await interaction.editReply({ embeds: [contentOrEmbed] });
-      } else {
-        sentMessage = await interaction.editReply({ content: contentOrEmbed });
-      }
+      if (contentOrEmbed instanceof EmbedBuilder) sentMessage = await interaction.editReply({ embeds: [contentOrEmbed] });
+      else sentMessage = await interaction.editReply({ content: contentOrEmbed });
     } else {
-      if (contentOrEmbed instanceof EmbedBuilder) {
-        sentMessage = await interaction.reply({ embeds: [contentOrEmbed], ephemeral, fetchReply: !ephemeral });
-      } else {
-        sentMessage = await interaction.reply({ content: contentOrEmbed, ephemeral, fetchReply: !ephemeral });
-      }
+      if (contentOrEmbed instanceof EmbedBuilder) sentMessage = await interaction.reply({ embeds: [contentOrEmbed], ephemeral, fetchReply: !ephemeral });
+      else sentMessage = await interaction.reply({ content: contentOrEmbed, ephemeral, fetchReply: !ephemeral });
     }
-
     if (!ephemeral && deleteAfterSec > 0 && sentMessage) {
-      setTimeout(async () => {
-        try { await sentMessage.delete(); } catch(err) {}
-      }, deleteAfterSec * 1000);
+      setTimeout(async () => { try { await sentMessage.delete(); } catch(err) {} }, deleteAfterSec*1000);
     }
-
-  } catch(err) {
-    console.error('safeReply失敗:', err);
-  }
+  } catch(err) { console.error('safeReply失敗:', err); }
 }
 
 client.login(process.env.TOKEN);
