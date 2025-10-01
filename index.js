@@ -1,9 +1,10 @@
-// index.js (最適化・統合版 / CommonJS)
-const Discord = require('discord.js');
-const { Pool } = require('pg');
-const schedule = require('node-schedule');
-const dotenv = require('dotenv');
-const http = require('http');
+// index.js (ES Module / Render対応版)
+import Discord from 'discord.js';
+import pkg from 'pg';
+const { Pool } = pkg;
+import schedule from 'node-schedule';
+import dotenv from 'dotenv';
+import http from 'http';
 
 dotenv.config();
 
@@ -200,6 +201,10 @@ client.on('interactionCreate', async (interaction) => {
 
 // ---------------- HTTP Server ----------------
 const PORT = process.env.PORT || 10000;
-http.createServer((req,res)=>{ res.writeHead(200,{'Content-Type':'text/plain'}); res.end('Bot is running\n'); }).listen(PORT,()=>console.log(`HTTP server running on port ${PORT}`));
+http.createServer((req,res)=>{
+  res.writeHead(200,{'Content-Type':'text/plain'});
+  res.end('Bot is running\n');
+}).listen(PORT,()=>console.log(`HTTP server running on port ${PORT}`));
 
+// ---------------- Login ----------------
 client.login(DISCORD_TOKEN);
