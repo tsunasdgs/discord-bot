@@ -1,4 +1,4 @@
-// main_ui_neon.js
+// main_ui_neon_fixed_final.js
 import { Client, GatewayIntentBits, Partials,
   ActionRowBuilder, ButtonBuilder, ButtonStyle,
   ModalBuilder, TextInputBuilder, TextInputStyle,
@@ -30,7 +30,7 @@ const {
 
 if (!DISCORD_TOKEN) throw new Error('Discord TOKEN が設定されていません');
 
-const ALLOWED_LUMMA_CHANNELS = LUMMA_CHANNELS?.split(',') || [];
+const ALLOWED_LUMMA_CHANNELS = LUMMA_CHANNELS?.split(',').map(c => c.trim()) || [];
 const DAILY_AMOUNT_NUM = Number(DAILY_AMOUNT);
 const MESSAGE_AMOUNT_NUM = Number(MESSAGE_AMOUNT);
 const MESSAGE_LIMIT_NUM = Number(MESSAGE_LIMIT);
@@ -123,16 +123,19 @@ client.on('messageCreate', async message => {
 });
 
 // ------------------- UI Helper -------------------
-const dailyButtons = () => new ActionRowBuilder<ButtonBuilder>().addComponents(
+const dailyButtons = () => new ActionRowBuilder().addComponents(
   new ButtonBuilder().setCustomId('daily').setLabel('デイリー報酬').setStyle(ButtonStyle.Primary),
   new ButtonBuilder().setCustomId('check_balance').setLabel('所持S確認').setStyle(ButtonStyle.Secondary)
 );
-const adminButton = () => new ActionRowBuilder<ButtonBuilder>().addComponents(
+
+const adminButton = () => new ActionRowBuilder().addComponents(
   new ButtonBuilder().setCustomId('admin_adjust').setLabel('コイン調整 (管理者)').setStyle(ButtonStyle.Danger)
 );
-const lummaButton = () => new ActionRowBuilder<ButtonBuilder>().addComponents(
+
+const lummaButton = () => new ActionRowBuilder().addComponents(
   new ButtonBuilder().setCustomId('lumma_create').setLabel('ルムマ作成').setStyle(ButtonStyle.Success)
 );
+
 const createEmbed = (title, desc, color='Blue') => new EmbedBuilder().setTitle(title).setDescription(desc).setColor(color);
 
 // ------------------- Ready -------------------
@@ -140,16 +143,18 @@ client.once('ready', async () => {
   console.log(`Logged in as ${client.user.tag}`);
   try {
     if (DAILY_CHANNEL_ID) {
-      const ch = await client.channels.fetch(DAILY_CHANNEL_ID);
-      if(ch?.isTextBased()) ch.send({ content:'デイリー報酬 & 所持S確認', components:[dailyButtons()] });
+      const ch = await client.channels.fetch(DAILY_CHANNEL_ID.trim());
+      if(ch?.isTextBased()) await ch.send({ content:'デイリー報酬 & 所持S確認', components:[dailyButtons()] });
     }
+
     if (ADMIN_CHANNEL_ID) {
-      const ch = await client.channels.fetch(ADMIN_CHANNEL_ID);
-      if(ch?.isTextBased()) ch.send({ content:'管理者用コイン操作', components:[adminButton()] });
+      const ch = await client.channels.fetch(ADMIN_CHANNEL_ID.trim());
+      if(ch?.isTextBased()) await ch.send({ content:'管理者用コイン操作', components:[adminButton()] });
     }
+
     for (const cid of ALLOWED_LUMMA_CHANNELS) {
       const ch = await client.channels.fetch(cid);
-      if(ch?.isTextBased()) ch.send({ content:'ルムマ作成', components:[lummaButton()] });
+      if(ch?.isTextBased()) await ch.send({ content:'ルムマ作成', components:[lummaButton()] });
     }
   } catch(e) { console.error('UI送信エラー:', e); }
 });
@@ -160,8 +165,7 @@ client.on('interactionCreate', async interaction => {
 
   // デイリー
   if(interaction.isButton() && interaction.customId==='daily'){
-    if(interaction.channelId !== DAILY_CHANNEL_ID)
-      return interaction.reply({ content:'このチャンネルでは使えません', ephemeral:true });
+    if(interaction.channelId !== DAILY_CHANNEL_ID) return interaction.reply({ content:'このチャンネルでは使えません', ephemeral:true });
 
     const res = await pool.query('SELECT last_claim FROM daily_claims WHERE user_id=$1', [userId]);
     const last = res.rows[0]?.last_claim;
@@ -200,6 +204,7 @@ client.on('interactionCreate', async interaction => {
       );
     return interaction.showModal(modal);
   }
+
   if(interaction.isModalSubmit() && interaction.customId==='adjust_modal'){
     const targetId = interaction.fields.getTextInputValue('target_user');
     const amount = parseInt(interaction.fields.getTextInputValue('amount'));
@@ -228,12 +233,13 @@ client.on('interactionCreate', async interaction => {
         );
       return interaction.showModal(modal);
     }
+
     if(interaction.isModalSubmit() && interaction.customId==='lumma_create_modal'){
       const raceName = interaction.fields.getTextInputValue('race_name');
       const entrants = parseInt(interaction.fields.getTextInputValue('entrants'));
       const betCoins = parseInt(interaction.fields.getTextInputValue('bet_coins'));
 
-      if(isNaN(entrants) || entrants <2 || entrants>18)
+      if(isNaN(entrants) || entrants<2 || entrants>18)
         return interaction.reply({ content:'出走人数は2~18人で入力してください', ephemeral:true });
       if(isNaN(betCoins) || betCoins<=0)
         return interaction.reply({ content:'賭けコインは1以上で入力してください', ephemeral:true });
