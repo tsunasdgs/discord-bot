@@ -1,4 +1,4 @@
-// main.js (Render + Neon + UMA仕様)
+// main.js (Render + Neon + UMA仕様 完全版)
 import { Client, GatewayIntentBits, Partials, ActionRowBuilder, ButtonBuilder, ButtonStyle, ModalBuilder, TextInputBuilder, TextInputStyle, EmbedBuilder } from 'discord.js';
 import { Pool } from 'pg';
 import schedule from 'node-schedule';
@@ -16,18 +16,29 @@ const client = new Client({
 });
 
 // ------------------- Config -------------------
-const DAILY_CHANNEL_ID = process.env.DAILY_CHANNEL_ID;
-const ADMIN_CHANNEL_ID = process.env.ADMIN_CHANNEL_ID;
-const ALLOWED_LUMMA_CHANNELS = process.env.LUMMA_CHANNELS?.split(',') || [];
-const DAILY_AMOUNT = Number(process.env.DAILY_AMOUNT || 100);
-const MESSAGE_AMOUNT = Number(process.env.MESSAGE_AMOUNT || 10);
-const MESSAGE_LIMIT = Number(process.env.MESSAGE_LIMIT || 5);
+const {
+  DISCORD_TOKEN,
+  DAILY_CHANNEL_ID,
+  ADMIN_CHANNEL_ID,
+  LUMMA_CHANNELS,
+  DATABASE_URL,
+  DAILY_AMOUNT = 100,
+  MESSAGE_AMOUNT = 10,
+  MESSAGE_LIMIT = 5
+} = process.env;
+
+if(!DISCORD_TOKEN) throw new Error('Discord TOKEN が設定されていません');
+
+const ALLOWED_LUMMA_CHANNELS = LUMMA_CHANNELS?.split(',') || [];
+const DAILY_AMOUNT_NUM = Number(DAILY_AMOUNT);
+const MESSAGE_AMOUNT_NUM = Number(MESSAGE_AMOUNT);
+const MESSAGE_LIMIT_NUM = Number(MESSAGE_LIMIT);
 const FORBIDDEN_WORDS = ['ああ','いい','AA'];
 const MESSAGE_COOLDOWN_MS = 60000;
 
 // ------------------- Database (Neon) -------------------
 const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
+  connectionString: DATABASE_URL,
   ssl: { rejectUnauthorized: false }
 });
 
@@ -52,7 +63,6 @@ async function initDB() {
     );
   `);
 
-  // ルムマテーブル変更: レース名・出走人数・賭けコイン・作成者
   await pool.query(`
     CREATE TABLE IF NOT EXISTS lumma_races (
       id SERIAL PRIMARY KEY,
@@ -107,9 +117,9 @@ client.on('messageCreate', async message => {
     'SELECT COUNT(*) FROM history WHERE user_id=$1 AND type=$2 AND timestamp::date=CURRENT_DATE',
     [message.author.id,'message']
   );
-  if (todayCount.rows[0].count >= MESSAGE_LIMIT) return;
+  if (todayCount.rows[0].count >= MESSAGE_LIMIT_NUM) return;
 
-  await updateCoins(message.author.id, MESSAGE_AMOUNT, 'message', '発言報酬');
+  await updateCoins(message.author.id, MESSAGE_AMOUNT_NUM, 'message', '発言報酬');
 });
 
 // ------------------- Bot Ready -------------------
@@ -130,9 +140,9 @@ client.on('interactionCreate', async interaction => {
     if(user.last_daily && new Date(user.last_daily).toDateString() === new Date().toDateString())
       return interaction.reply({ content: '今日のデイリーは取得済み', ephemeral: true });
 
-    await updateCoins(userId, DAILY_AMOUNT, 'daily', 'デイリー報酬');
+    await updateCoins(userId, DAILY_AMOUNT_NUM, 'daily', 'デイリー報酬');
     await pool.query('UPDATE users SET last_daily=$1 WHERE user_id=$2', [new Date(), userId]);
-    return interaction.reply({ content: `デイリー ${DAILY_AMOUNT}S 取得!`, ephemeral: true });
+    return interaction.reply({ content: `デイリー ${DAILY_AMOUNT_NUM}S 取得!`, ephemeral: true });
   }
 
   // ===== 所持S確認 =====
@@ -217,4 +227,4 @@ client.on('interactionCreate', async interaction => {
 });
 
 // ------------------- Bot Login -------------------
-client.login(process.env.TOKEN);
+client.login(DISCORD_TOKEN);
