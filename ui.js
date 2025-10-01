@@ -1,5 +1,6 @@
 import Discord from 'discord.js';
 
+// ボタン
 export const dailyButtons = () => new Discord.ActionRowBuilder().addComponents([
   new Discord.ButtonBuilder().setCustomId('daily_claim').setLabel('💰 デイリー取得').setStyle(Discord.ButtonStyle.Primary),
   new Discord.ButtonBuilder().setCustomId('check_balance').setLabel('📊 残高確認').setStyle(Discord.ButtonStyle.Secondary),
@@ -17,3 +18,12 @@ export const adminButtons = () => new Discord.ActionRowBuilder().addComponents([
   new Discord.ButtonBuilder().setCustomId('adjust_coins').setLabel('⚙ コイン増減').setStyle(Discord.ButtonStyle.Danger),
   new Discord.ButtonBuilder().setCustomId('history_all').setLabel('📜 全員取引履歴').setStyle(Discord.ButtonStyle.Secondary)
 ]);
+
+// Embed作成関数
+export const createEmbed = (title, description, color='Blue') => {
+  return new Discord.EmbedBuilder().setTitle(title).setDescription(description).setColor(color);
+};
+
+export const createFieldEmbed = (title, fields, color='Blue') => {
+  return new Discord.EmbedBuilder().setTitle(title).addFields(fields).setColor(color);
+};
