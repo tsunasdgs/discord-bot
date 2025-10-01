@@ -2,7 +2,7 @@
 import 'dotenv/config';
 import express from 'express';
 import { 
-  Client, GatewayIntentBits,
+  Client, GatewayIntentBits, Partials, PermissionsBitField,
   ActionRowBuilder, ButtonBuilder, ButtonStyle,
   EmbedBuilder, ModalBuilder, TextInputBuilder, TextInputStyle, InteractionType, SelectMenuBuilder
 } from 'discord.js';
@@ -18,11 +18,12 @@ app.get('/', (req, res) => res.send('Bot is running'));
 app.listen(PORT, () => console.log(`Server listening on port ${PORT}`));
 
 const client = new Client({
-  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent]
+  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent],
+  partials: [Partials.Channel]
 });
 
-// ----- デイリーリセット（朝5時） -----
-schedule.scheduleJob('0 5 * * *', async () => {
+// ----- デイリーリセット（日本時間 5時） -----
+schedule.scheduleJob('0 20 * * *', async () => { // UTC基準なので20:00で日本時間5時
   await coin.resetDaily();
   console.log('デイリー報酬リセット完了');
 });
@@ -35,74 +36,78 @@ client.once('ready', async () => {
   const ADMIN_CHANNEL_ID = process.env.ADMIN_CHANNEL_ID;
 
   // デイリー用メッセージ
-  const dailyChannel = await client.channels.fetch(DAILY_CHANNEL_ID);
-  if (dailyChannel?.isTextBased()) {
-    const embed = new EmbedBuilder()
-      .setTitle('デイリー報酬')
-      .setDescription(`ボタンを押して本日のデイリー報酬を取得！\n報酬: ${process.env.DAILY_AMOUNT}S`)
-      .setColor('Green');
+  try {
+    const dailyChannel = await client.channels.fetch(DAILY_CHANNEL_ID);
+    if (dailyChannel?.isTextBased()) {
+      const embed = new EmbedBuilder()
+        .setTitle('デイリー報酬')
+        .setDescription(`ボタンを押して本日のデイリー報酬を取得！\n報酬: ${process.env.DAILY_AMOUNT}S`)
+        .setColor('Green');
 
-    const row = new ActionRowBuilder()
-      .addComponents(
-        new ButtonBuilder().setCustomId('daily').setLabel('デイリー取得').setStyle(ButtonStyle.Primary),
-        new ButtonBuilder().setCustomId('check_balance').setLabel('所持S確認').setStyle(ButtonStyle.Secondary),
-        new ButtonBuilder().setCustomId('view_ranking').setLabel('ランキング').setStyle(ButtonStyle.Secondary)
-      );
+      const row = new ActionRowBuilder()
+        .addComponents(
+          new ButtonBuilder().setCustomId('daily').setLabel('デイリー取得').setStyle(ButtonStyle.Primary),
+          new ButtonBuilder().setCustomId('check_balance').setLabel('所持S確認').setStyle(ButtonStyle.Secondary),
+          new ButtonBuilder().setCustomId('view_ranking').setLabel('ランキング').setStyle(ButtonStyle.Secondary)
+        );
 
-    await dailyChannel.send({ embeds: [embed], components: [row] });
-  }
+      await dailyChannel.send({ embeds: [embed], components: [row] });
+    }
+  } catch(err) { console.error('デイリー用メッセージ送信エラー:', err); }
 
   // 管理者用メッセージ
-  const adminChannel = await client.channels.fetch(ADMIN_CHANNEL_ID);
-  if (adminChannel?.isTextBased()) {
-    const adminEmbed = new EmbedBuilder()
-      .setTitle('管理者コイン操作')
-      .setDescription('ユーザーのコイン増減や取引履歴確認が可能です。')
-      .setColor('Red');
+  try {
+    const adminChannel = await client.channels.fetch(ADMIN_CHANNEL_ID);
+    if (adminChannel?.isTextBased()) {
+      const adminEmbed = new EmbedBuilder()
+        .setTitle('管理者コイン操作')
+        .setDescription('ユーザーのコイン増減や取引履歴確認が可能です。')
+        .setColor('Red');
 
-    const adminRow = new ActionRowBuilder()
-      .addComponents(
-        new ButtonBuilder().setCustomId('admin_adjust').setLabel('コイン増減').setStyle(ButtonStyle.Primary),
-        new ButtonBuilder().setCustomId('view_history').setLabel('取引履歴確認').setStyle(ButtonStyle.Secondary)
-      );
+      const adminRow = new ActionRowBuilder()
+        .addComponents(
+          new ButtonBuilder().setCustomId('admin_adjust').setLabel('コイン増減').setStyle(ButtonStyle.Primary),
+          new ButtonBuilder().setCustomId('view_history').setLabel('取引履歴確認').setStyle(ButtonStyle.Secondary)
+        );
 
-    await adminChannel.send({ embeds: [adminEmbed], components: [adminRow] });
-  }
+      await adminChannel.send({ embeds: [adminEmbed], components: [adminRow] });
+    }
+  } catch(err) { console.error('管理者用メッセージ送信エラー:', err); }
 });
 
-// ----- インタラクション -----
+// ----- インタラクション処理 -----
 client.on('interactionCreate', async interaction => {
   const DAILY_CHANNEL_ID = process.env.DAILY_CHANNEL_ID;
   const ADMIN_CHANNEL_ID = process.env.ADMIN_CHANNEL_ID;
 
   try {
-    // デイリー
+    // デイリー取得
     if (interaction.isButton() && interaction.customId === 'daily') {
-      if (interaction.channelId !== DAILY_CHANNEL_ID) return safeReply(interaction, 'このチャンネルでは使用できません', true, 5);
+      if (interaction.channelId !== DAILY_CHANNEL_ID) return safeReply(interaction, 'このチャンネルでは使用できません', true);
       const claimed = await coin.claimDaily(interaction.user.id);
-      const message = claimed ? `デイリー取得: ${process.env.DAILY_AMOUNT}S` : '今日のデイリーは取得済み';
-      return safeReply(interaction, message, false, 5);
+      return safeReply(interaction, claimed ? `デイリー取得: ${process.env.DAILY_AMOUNT}S` : '今日のデイリーは取得済み', false);
     }
 
-    // 残高確認
+    // 所持S確認
     if (interaction.isButton() && interaction.customId === 'check_balance') {
       const bal = await coin.getBalance(interaction.user.id);
-      return safeReply(interaction, `あなたの所持S: ${bal}S`, false, 5);
+      return safeReply(interaction, `あなたの所持S: ${bal}S`, false);
     }
 
-    // ランキング
+    // ランキング表示
     if (interaction.isButton() && interaction.customId === 'view_ranking') {
       const top = await coin.getTop();
       const embed = new EmbedBuilder()
         .setTitle('コインランキング（上位10名）')
         .setColor('Gold')
         .setDescription(top.map((r,i)=>`${i+1}. <@${r.user_id}> - ${r.balance}S`).join('\n'));
-      return safeReply(interaction, embed, false, 5);
+      return safeReply(interaction, embed, false);
     }
 
     // 管理者操作
     if (interaction.isButton() && interaction.customId === 'admin_adjust') {
-      if (interaction.channelId !== ADMIN_CHANNEL_ID || !interaction.member.permissions.has('Administrator')) return;
+      const member = interaction.member;
+      if (!member.permissions.has(PermissionsBitField.Flags.Administrator) || interaction.channelId !== ADMIN_CHANNEL_ID) return;
 
       const modal = new ModalBuilder()
         .setCustomId('adjust_modal')
@@ -119,14 +124,12 @@ client.on('interactionCreate', async interaction => {
     }
 
     // モーダル提出
-    if (interaction.isModalSubmit()) {
-      if (interaction.customId === 'adjust_modal') {
-        const targetId = interaction.fields.getTextInputValue('target_user');
-        const amount = parseInt(interaction.fields.getTextInputValue('amount'));
-        if (isNaN(amount)) return safeReply(interaction, '数値を入力してください', true, 5);
-        await coin.updateCoins(targetId, amount, 'admin', `管理者操作 by ${interaction.user.id}`);
-        return safeReply(interaction, `ユーザー ${targetId} の所持Sを更新しました`, false, 5);
-      }
+    if (interaction.isModalSubmit() && interaction.customId === 'adjust_modal') {
+      const targetId = interaction.fields.getTextInputValue('target_user');
+      const amount = parseInt(interaction.fields.getTextInputValue('amount'));
+      if (isNaN(amount)) return safeReply(interaction, '数値を入力してください', true);
+      await coin.updateCoins(targetId, amount, 'admin', `管理者操作 by ${interaction.user.id}`);
+      return safeReply(interaction, `ユーザー ${targetId} の所持Sを更新しました`, false);
     }
 
     // 取引履歴
@@ -136,7 +139,7 @@ client.on('interactionCreate', async interaction => {
         .setTitle('最近の取引履歴（最新10件）')
         .setColor('Blue')
         .setDescription(rows.map(r=>`[${r.created_at.toISOString()}] ${r.user_id} ${r.type} ${r.amount}S - ${r.note}`).join('\n'));
-      return safeReply(interaction, embed, false, 5);
+      return safeReply(interaction, embed, false);
     }
 
     // UMA / ガチャ / ルムマ
@@ -146,14 +149,14 @@ client.on('interactionCreate', async interaction => {
       if (interaction.commandName.startsWith('rumma')) await rumma.handleCommand(interaction, coin);
     }
 
-    // ルムマのボタン・モーダル・セレクト処理
+    // ルムマ関連のボタン・モーダル・セレクト
     if (interaction.isButton() || interaction.isSelectMenu() || interaction.type === InteractionType.ModalSubmit) {
       await rumma.handleInteraction(interaction, coin);
     }
 
-  } catch (err) {
+  } catch(err) {
     console.error("インタラクション処理中エラー:", err);
-    if (interaction.isRepliable()) safeReply(interaction, 'エラーが発生しました', true, 5);
+    if (interaction.isRepliable()) safeReply(interaction, 'エラーが発生しました', true);
   }
 });
 
@@ -175,10 +178,12 @@ async function safeReply(interaction, contentOrEmbed, ephemeral = false, deleteA
       if (contentOrEmbed instanceof EmbedBuilder) sentMessage = await interaction.reply({ embeds: [contentOrEmbed], ephemeral, fetchReply: !ephemeral });
       else sentMessage = await interaction.reply({ content: contentOrEmbed, ephemeral, fetchReply: !ephemeral });
     }
+
     if (!ephemeral && deleteAfterSec > 0 && sentMessage) {
       setTimeout(async () => { try { await sentMessage.delete(); } catch(err) {} }, deleteAfterSec*1000);
     }
   } catch(err) { console.error('safeReply失敗:', err); }
 }
 
-client.login(process.env.TOKEN);
+// ----- Botログイン -----
+client.login(process.env.BOT_TOKEN);
