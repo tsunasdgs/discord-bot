@@ -1,5 +1,5 @@
 import 'dotenv/config';
-import { Client, GatewayIntentBits, Partials } from 'discord.js';
+import { Client, GatewayIntentBits, Partials, REST, Routes, SlashCommandBuilder } from 'discord.js';
 import { v4 as uuidv4 } from 'uuid';
 import {
   ActionRowBuilder, ButtonBuilder, ButtonStyle, ModalBuilder,
@@ -8,6 +8,9 @@ import {
 } from 'discord.js';
 
 const RUMMA_CHANNEL_ID = process.env.RUMMA_CHANNEL_ID;
+const CLIENT_ID = process.env.CLIENT_ID;
+const GUILD_ID = process.env.GUILD_ID;
+const BOT_TOKEN = process.env.BOT_TOKEN;
 
 class RaceManager {
   constructor() {
@@ -120,8 +123,6 @@ class RaceManager {
   async handleInteraction(interaction) {
     if (interaction.channelId !== RUMMA_CHANNEL_ID) return;
 
-    const raceIdFromCustomId = (id) => id.split('_')[1];
-
     if (interaction.isButton()) {
       const [action, raceId, horseId] = interaction.customId.split('_');
       const race = this.races[raceId];
@@ -202,23 +203,43 @@ async function initBot() {
 
   const manager = new RaceManager();
 
+  // --- スラッシュコマンド登録 ---
+  const commands = [
+    new SlashCommandBuilder()
+      .setName('race')
+      .setDescription('レースを作成します')
+      .addStringOption(option => 
+        option.setName('name')
+          .setDescription('レース名')
+          .setRequired(true))
+      .addStringOption(option => 
+        option.setName('horses')
+          .setDescription('馬名をカンマ区切りで入力')
+          .setRequired(true))
+      .toJSON()
+  ];
+
+  const rest = new REST({ version: '10' }).setToken(BOT_TOKEN);
+  await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), { body: commands });
+
   client.once('ready', async () => {
     console.log(`Logged in as ${client.user.tag}`);
-    try {
-      const channel = await client.channels.fetch(RUMMA_CHANNEL_ID);
-      const raceId = manager.createRace('テストレース', client.user.id, ['馬A', '馬B', '馬C']);
-      await manager.sendRaceUI(channel, raceId);
-      console.log('テストUI送信完了');
-    } catch (err) {
-      console.error('initBot error:', err);
-    }
   });
 
   client.on('interactionCreate', async (interaction) => {
+    if (interaction.isChatInputCommand() && interaction.commandName === 'race') {
+      const name = interaction.options.getString('name');
+      const horses = interaction.options.getString('horses').split(',').map(s => s.trim()).filter(s => s);
+      const channel = await client.channels.fetch(RUMMA_CHANNEL_ID);
+      const raceId = manager.createRace(name, interaction.user.id, horses);
+      await manager.sendRaceUI(channel, raceId);
+      return interaction.reply({ content: `レース "${name}" を作成しました！`, ephemeral: false });
+    }
+
     await manager.handleInteraction(interaction);
   });
 
-  await client.login(process.env.BOT_TOKEN);
+  await client.login(BOT_TOKEN);
 }
 
 initBot();
