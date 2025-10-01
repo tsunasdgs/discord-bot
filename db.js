@@ -8,10 +8,12 @@ export const pool = new Pool({ connectionString: process.env.DATABASE_URL, ssl: 
 export async function initDB() {
   const tables = [
     `CREATE TABLE IF NOT EXISTS coins (
-      user_id TEXT PRIMARY KEY, balance BIGINT DEFAULT 0
+      user_id TEXT PRIMARY KEY,
+      balance BIGINT DEFAULT 0
     );`,
     `CREATE TABLE IF NOT EXISTS daily_claims (
-      user_id TEXT PRIMARY KEY, last_claim DATE
+      user_id TEXT PRIMARY KEY,
+      last_claim DATE
     );`,
     `CREATE TABLE IF NOT EXISTS history (
       id SERIAL PRIMARY KEY,
@@ -52,10 +54,21 @@ export async function getUser(userId){
 }
 
 export async function updateCoins(userId, amount, type='manual', note=''){
-  await pool.query(`
-    INSERT INTO coins(user_id, balance) VALUES($1,$2)
-    ON CONFLICT(user_id) DO UPDATE SET balance=coins.balance+$2
-  `,[userId, amount]);
-  await pool.query('INSERT INTO history(user_id,type,amount,note) VALUES($1,$2,$3,$4)',[userId,type,amount,note]);
-  return getUser(userId);
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query(`
+      INSERT INTO coins(user_id, balance) VALUES($1,$2)
+      ON CONFLICT(user_id) DO UPDATE SET balance=coins.balance+$2
+    `,[userId, amount]);
+    await client.query('INSERT INTO history(user_id,type,amount,note) VALUES($1,$2,$3,$4)',[userId,type,amount,note]);
+    await client.query('COMMIT');
+    const user = await client.query('SELECT * FROM coins WHERE user_id=$1',[userId]);
+    return user.rows[0];
+  } catch(e){
+    await client.query('ROLLBACK');
+    throw e;
+  } finally {
+    client.release();
+  }
 }
