@@ -1,4 +1,4 @@
-// main_ui_refactored.js
+// main_ui_env_ui.js
 import { Client, GatewayIntentBits, Partials,
   ActionRowBuilder, ButtonBuilder, ButtonStyle,
   ModalBuilder, TextInputBuilder, TextInputStyle,
@@ -28,7 +28,7 @@ const {
   MESSAGE_LIMIT = 5
 } = process.env;
 
-if(!DISCORD_TOKEN) throw new Error('Discord TOKEN が設定されていません');
+if (!DISCORD_TOKEN) throw new Error('Discord TOKEN が設定されていません');
 
 const ALLOWED_LUMMA_CHANNELS = LUMMA_CHANNELS?.split(',') || [];
 const DAILY_AMOUNT_NUM = Number(DAILY_AMOUNT);
@@ -117,7 +117,7 @@ client.on('messageCreate', async message => {
   await updateCoins(message.author.id, MESSAGE_AMOUNT_NUM, 'message', '発言報酬');
 });
 
-// ------------------- UIヘルパー -------------------
+// ------------------- UI Helper -------------------
 function dailyButtons() {
   return new ActionRowBuilder<ButtonBuilder>().addComponents(
     new ButtonBuilder().setCustomId('daily').setLabel('デイリー報酬').setStyle(ButtonStyle.Primary),
@@ -138,19 +138,33 @@ function createEmbed(title, description, color='Blue') {
   return new EmbedBuilder().setTitle(title).setDescription(description).setColor(color);
 }
 
-// ------------------- Bot Ready -------------------
+// ------------------- Ready: 即UI送信 -------------------
 client.once('ready', async () => {
   console.log(`Logged in as ${client.user.tag}`);
 
-  const dailyChannel = await client.channels.fetch(DAILY_CHANNEL_ID);
-  if(dailyChannel?.isTextBased()) dailyChannel.send({ content:'デイリー報酬 & 所持S確認', components:[dailyButtons()] });
+  try {
+    // デイリー用
+    if (DAILY_CHANNEL_ID) {
+      const dailyChannel = await client.channels.fetch(DAILY_CHANNEL_ID);
+      if(dailyChannel?.isTextBased())
+        dailyChannel.send({ content:'デイリー報酬 & 所持S確認', components:[dailyButtons()] });
+    }
 
-  const adminChannel = await client.channels.fetch(ADMIN_CHANNEL_ID);
-  if(adminChannel?.isTextBased()) adminChannel.send({ content:'管理者用コイン操作', components:[adminButton()] });
+    // 管理者用
+    if (ADMIN_CHANNEL_ID) {
+      const adminChannel = await client.channels.fetch(ADMIN_CHANNEL_ID);
+      if(adminChannel?.isTextBased())
+        adminChannel.send({ content:'管理者用コイン操作', components:[adminButton()] });
+    }
 
-  for(const cid of ALLOWED_LUMMA_CHANNELS){
-    const ch = await client.channels.fetch(cid);
-    if(ch?.isTextBased()) ch.send({ content:'ルムマ作成', components:[lummaButton()] });
+    // ルムマ用
+    for(const cid of ALLOWED_LUMMA_CHANNELS){
+      const ch = await client.channels.fetch(cid);
+      if(ch?.isTextBased())
+        ch.send({ content:'ルムマ作成', components:[lummaButton()] });
+    }
+  } catch(e) {
+    console.error('UI送信エラー:', e);
   }
 });
 
@@ -158,7 +172,7 @@ client.once('ready', async () => {
 client.on('interactionCreate', async interaction => {
   const userId = interaction.user.id;
 
-  // ===== デイリー報酬 =====
+  // ===== デイリー =====
   if(interaction.isButton() && interaction.customId==='daily'){
     if(interaction.channelId !== DAILY_CHANNEL_ID)
       return interaction.reply({ content: 'このチャンネルでは使えません', ephemeral: true });
@@ -178,7 +192,7 @@ client.on('interactionCreate', async interaction => {
     return interaction.reply({ embeds:[createEmbed('所持S', `所持S: ${user.coins}S`)], ephemeral:true });
   }
 
-  // ===== 管理者コイン操作 =====
+  // ===== 管理者 =====
   if(interaction.isButton() && interaction.customId==='admin_adjust'){
     if(interaction.channelId !== ADMIN_CHANNEL_ID || !interaction.member.permissions.has(PermissionsBitField.Flags.Administrator)) return;
 
@@ -206,7 +220,7 @@ client.on('interactionCreate', async interaction => {
     return interaction.reply({ embeds:[createEmbed('コイン調整完了', `ユーザー ${targetId} の所持Sを ${newBalance}S に更新`, 'Green')], ephemeral:true });
   }
 
-  // ===== ルムマ作成 =====
+  // ===== ルムマ =====
   if(ALLOWED_LUMMA_CHANNELS.includes(interaction.channelId)){
     if(interaction.isButton() && interaction.customId==='lumma_create'){
       const modal = new ModalBuilder()
@@ -249,7 +263,7 @@ client.on('interactionCreate', async interaction => {
   }
 });
 
-// ------------------- HTTP サーバー（Web Service 用） -------------------
+// ------------------- HTTP サーバー -------------------
 const PORT = process.env.PORT || 10000;
 http.createServer((req,res)=>{
   res.writeHead(200, {'Content-Type':'text/plain'});
