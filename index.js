@@ -167,93 +167,104 @@ client.once('ready', async () => {
 // ---------------- Interaction ----------------
 client.on('interactionCreate', async (interaction) => {
   const uid = interaction.user.id;
-  const member = await interaction.guild.members.fetch(uid);
-  const replyEmbed = (emb)=> interaction.reply({ embeds:[emb], ephemeral:true });
 
-  // 権限チェック
-  const restrictedInteractions = ['lumma_create','lumma_list','lumma_bet','lumma_close','lumma_my_bets'];
-  if(((interaction.isStringSelectMenu() && restrictedInteractions.includes(interaction.customId)) || 
-      (interaction.isModalSubmit() && interaction.customId.startsWith('lumma_create_modal')) ||
-      (interaction.isStringSelectMenu() && interaction.customId.startsWith('select_race')) ||
-      (interaction.isStringSelectMenu() && interaction.customId.startsWith('bet_')) ||
-      (interaction.isModalSubmit() && interaction.customId.startsWith('bet_amount_')) ||
-      (interaction.isStringSelectMenu() && interaction.customId.startsWith('close_')))
-     && !await checkRole(member)){
-    return replyEmbed(createEmbed('権限エラー','この操作は許可ロールが必要です','Red'));
-  }
+  try {
+    const member = await interaction.guild.members.fetch(uid);
+    const replyEmbed = async (emb) => {
+      if (interaction.deferred || interaction.replied) {
+        return interaction.editReply({ embeds: [emb] }).catch(()=>{});
+      } else {
+        return interaction.reply({ embeds: [emb], ephemeral: true }).catch(()=>{});
+      }
+    };
 
-  // ---------- デイリーボタン ----------
-  if(interaction.isButton() && interaction.customId==='daily_claim'){
-    const res = await pool.query('SELECT last_claim FROM daily_claims WHERE user_id=$1',[uid]);
-    const last = res.rows[0]?.last_claim;
-    if(last && new Date(last).toDateString()===new Date().toDateString())
-      return interaction.reply({ embeds:[createEmbed('通知','今日のデイリーは取得済み')], ephemeral:true });
-
-    await updateCoins(uid,DAILY_AMOUNT_NUM,'daily','デイリー報酬');
-    await pool.query(`INSERT INTO daily_claims(user_id,last_claim) VALUES($1,CURRENT_DATE)
-                      ON CONFLICT (user_id) DO UPDATE SET last_claim=CURRENT_DATE`,[uid]);
-    return interaction.reply({ embeds:[createEmbed('デイリー取得',`デイリー ${DAILY_AMOUNT_NUM}S 取得!`,'Green')], ephemeral:true });
-  }
-
-  // ---------- メインメニュー ----------
-  if(interaction.isStringSelectMenu() && interaction.customId==='main_menu'){
-    const choice = interaction.values[0];
-
-    // 残高確認
-    if(choice==='check_balance'){
-      const user = await getUser(uid);
-      return replyEmbed(createFieldEmbed('所持S',[
-        { name:'ユーザー', value:`<@${uid}>`, inline:true },
-        { name:'残高', value:`${user.balance}S`, inline:true }
-      ],'Gold'));
+    // 権限チェック
+    const restrictedInteractions = ['lumma_create','lumma_list','lumma_bet','lumma_close','lumma_my_bets'];
+    if(((interaction.isStringSelectMenu() && restrictedInteractions.includes(interaction.customId)) || 
+        (interaction.isModalSubmit() && interaction.customId.startsWith('lumma_create_modal')) ||
+        (interaction.isStringSelectMenu() && interaction.customId.startsWith('select_race')) ||
+        (interaction.isStringSelectMenu() && interaction.customId.startsWith('bet_')) ||
+        (interaction.isModalSubmit() && interaction.customId.startsWith('bet_amount_')) ||
+        (interaction.isStringSelectMenu() && interaction.customId.startsWith('close_')))
+       && !await checkRole(member)){
+      return replyEmbed(createEmbed('権限エラー','この操作は許可ロールが必要です','Red'));
     }
 
-    // 履歴確認
-    if(choice==='check_history'){
-      const res = await pool.query('SELECT * FROM history WHERE user_id=$1 ORDER BY created_at DESC LIMIT 5',[uid]);
-      if(!res.rows.length) return replyEmbed(createEmbed('履歴','取引履歴はありません','Grey'));
-      const fields = res.rows.map(r=>({ name:`${r.type} (${r.amount>0?'+':''}${r.amount}S)`, value:`${r.note||''} - ${new Date(r.created_at).toLocaleString()}` }));
-      return replyEmbed(createFieldEmbed('直近の履歴',fields,'Blue'));
+    // ---------- デイリーボタン ----------
+    if(interaction.isButton() && interaction.customId==='daily_claim'){
+      const res = await pool.query('SELECT last_claim FROM daily_claims WHERE user_id=$1',[uid]);
+      const last = res.rows[0]?.last_claim;
+      if(last && new Date(last).toDateString()===new Date().toDateString())
+        return replyEmbed(createEmbed('通知','今日のデイリーは取得済み'));
+
+      await updateCoins(uid,DAILY_AMOUNT_NUM,'daily','デイリー報酬');
+      await pool.query(`INSERT INTO daily_claims(user_id,last_claim) VALUES($1,CURRENT_DATE)
+                        ON CONFLICT (user_id) DO UPDATE SET last_claim=CURRENT_DATE`,[uid]);
+      return replyEmbed(createEmbed('デイリー取得',`デイリー ${DAILY_AMOUNT_NUM}S 取得!`,'Green'));
     }
 
-    // ルムマ作成
-    if(choice==='lumma_create'){
-      if(!ALLOWED_LUMMA_CHANNELS.includes(interaction.channelId)) 
-        return replyEmbed(createEmbed('エラー','このチャンネルではルムマを作成できません','Red'));
-      const modal = new Discord.ModalBuilder()
-        .setCustomId('lumma_create_modal')
-        .setTitle('ルムマレース作成')
-        .addComponents(
-          createRow([ new Discord.TextInputBuilder().setCustomId('race_name').setLabel('レース名').setStyle(Discord.TextInputStyle.Short).setRequired(true) ]),
-          createRow([ new Discord.TextInputBuilder().setCustomId('horses').setLabel('出走馬名(カンマ区切り)').setStyle(Discord.TextInputStyle.Paragraph).setRequired(true) ])
-        );
-      return interaction.showModal(modal);
+    // ---------- メインメニュー ----------
+    if(interaction.isStringSelectMenu() && interaction.customId==='main_menu'){
+      const choice = interaction.values[0];
+
+      if(choice==='check_balance'){
+        const user = await getUser(uid);
+        return replyEmbed(createFieldEmbed('所持S',[
+          { name:'ユーザー', value:`<@${uid}>`, inline:true },
+          { name:'残高', value:`${user.balance}S`, inline:true }
+        ],'Gold'));
+      }
+
+      if(choice==='check_history'){
+        const res = await pool.query('SELECT * FROM history WHERE user_id=$1 ORDER BY created_at DESC LIMIT 5',[uid]);
+        if(!res.rows.length) return replyEmbed(createEmbed('履歴','取引履歴はありません','Grey'));
+        const fields = res.rows.map(r=>({ name:`${r.type} (${r.amount>0?'+':''}${r.amount}S)`, value:`${r.note||''} - ${new Date(r.created_at).toLocaleString()}` }));
+        return replyEmbed(createFieldEmbed('直近の履歴',fields,'Blue'));
+      }
+
+      if(choice==='lumma_create'){
+        if(!ALLOWED_LUMMA_CHANNELS.includes(interaction.channelId)) 
+          return replyEmbed(createEmbed('エラー','このチャンネルではルムマを作成できません','Red'));
+
+        const modal = new Discord.ModalBuilder()
+          .setCustomId('lumma_create_modal')
+          .setTitle('ルムマレース作成')
+          .addComponents(
+            createRow([ new Discord.TextInputBuilder().setCustomId('race_name').setLabel('レース名').setStyle(Discord.TextInputStyle.Short).setRequired(true) ]),
+            createRow([ new Discord.TextInputBuilder().setCustomId('horses').setLabel('出走馬名(カンマ区切り)').setStyle(Discord.TextInputStyle.Paragraph).setRequired(true) ])
+          );
+        return interaction.showModal(modal);
+      }
+
+      // ...ここに既存ルムマ list/bet/close/my_bets の処理を安全に追加...
+    }
+
+    // ---------- ルムマ作成モーダル ----------
+    if(interaction.isModalSubmit() && interaction.customId==='lumma_create_modal'){
+      await interaction.deferReply({ ephemeral:true });
+
+      const raceName = interaction.fields.getTextInputValue('race_name');
+      const horses = interaction.fields.getTextInputValue('horses').split(',').map(h=>h.trim()).filter(h=>h);
+
+      if(!raceName || horses.length<2)
+        return interaction.editReply({ embeds:[createEmbed('エラー','レース名または出走馬が不十分です','Red')] });
+
+      await pool.query(
+        'INSERT INTO lumma_races(channel_id, host_id, race_name, entrants) VALUES($1,$2,$3,$4)',
+        [interaction.channelId, uid, raceName, horses.length]
+      );
+
+      return interaction.editReply({ embeds:[createEmbed('ルムマ作成完了',`レース: ${raceName}\n出走馬: ${horses.join(', ')}`,'Green')] });
+    }
+
+  } catch (err) {
+    console.error('interaction error:', err);
+    if(interaction.deferred || interaction.replied){
+      interaction.editReply({ embeds:[createEmbed('エラー','内部エラーが発生しました','Red')] }).catch(()=>{});
+    } else {
+      interaction.reply({ embeds:[createEmbed('エラー','内部エラーが発生しました','Red')], ephemeral:true }).catch(()=>{});
     }
   }
-
-  // ---------- ルムマ作成モーダル ----------
-  if(interaction.isModalSubmit() && interaction.customId==='lumma_create_modal'){
-    if(!ALLOWED_LUMMA_CHANNELS.includes(interaction.channelId)) 
-      return replyEmbed(createEmbed('エラー','このチャンネルではルムマを作成できません','Red'));
-
-    await interaction.deferReply({ ephemeral:true });
-    const raceName = interaction.fields.getTextInputValue('race_name');
-    const horsesText = interaction.fields.getTextInputValue('horses');
-    const horses = horsesText.split(',').map(h=>h.trim()).filter(h=>h);
-
-    if(!raceName || horses.length<2)
-      return interaction.editReply({ embeds:[createEmbed('エラー','レース名または出走馬が不十分です','Red')] });
-
-    await pool.query(
-      'INSERT INTO lumma_races(channel_id, host_id, race_name, entrants) VALUES($1,$2,$3,$4)',
-      [interaction.channelId, uid, raceName, horses.length]
-    );
-
-    return interaction.editReply({ embeds:[createEmbed('ルムマ作成完了',`レース: ${raceName}\n出走馬: ${horses.join(', ')}`,'Green')] });
-  }
-
-  // ---------- ここからは既存のルムマ賭け/勝者確定処理をそのまま ----------
-  // ...（略、既存の bet / close / my_bets / list 処理を保持）...
 });
 
 // ---------------- HTTP Server ----------------
