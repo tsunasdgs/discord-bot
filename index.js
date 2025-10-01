@@ -169,19 +169,22 @@ client.once('ready', async () => {
   } catch(e){ console.error('UI送信エラー:',e); }
 });
 
+// ---------------- 安全な replyEmbed ----------------
+const replyEmbed = async (interaction, emb) => {
+  try {
+    if(interaction.deferred || interaction.replied){
+      await interaction.editReply({ embeds:[emb] }).catch(()=>{});
+    } else {
+      await interaction.reply({ embeds:[emb], flags: Discord.MessageFlags.Ephemeral }).catch(()=>{});
+    }
+  } catch {}
+};
+
 // ---------------- Interaction ----------------
 client.on('interactionCreate', async (interaction) => {
   const uid = interaction.user.id;
   try {
     const member = interaction.guild ? await interaction.guild.members.fetch(uid) : null;
-
-    const replyEmbed = async (emb) => {
-      if(interaction.deferred || interaction.replied){
-        return interaction.editReply({ embeds:[emb] }).catch(()=>{});
-      } else {
-        return interaction.reply({ embeds:[emb], ephemeral:true }).catch(()=>{});
-      }
-    };
 
     // 権限チェック
     const restrictedInteractions = ['lumma_create','lumma_list','lumma_bet','lumma_close','lumma_my_bets'];
@@ -192,13 +195,13 @@ client.on('interactionCreate', async (interaction) => {
         (interaction.isModalSubmit() && interaction.customId.startsWith('bet_amount_')) ||
         (interaction.isStringSelectMenu() && interaction.customId.startsWith('close_')))
        && !(member && await checkRole(member))){
-      return replyEmbed(createEmbed('権限エラー','この操作は許可ロールが必要です','Red'));
+      return replyEmbed(interaction, createEmbed('権限エラー','この操作は許可ロールが必要です','Red'));
     }
 
     // ---------- デイリーボタン ----------
     if(interaction.isButton() && interaction.customId==='daily_claim'){
-      if(!member) return replyEmbed(createEmbed('エラー','サーバー内でのみ有効です','Red'));
-      await interaction.deferReply({ ephemeral:true });
+      if(!member) return replyEmbed(interaction, createEmbed('エラー','サーバー内でのみ有効です','Red'));
+      await interaction.deferReply({ flags: Discord.MessageFlags.Ephemeral });
 
       const res = await pool.query('SELECT last_claim FROM daily_claims WHERE user_id=$1',[uid]);
       const last = res.rows[0]?.last_claim;
@@ -217,7 +220,7 @@ client.on('interactionCreate', async (interaction) => {
 
       if(choice==='check_balance'){
         const user = await getUser(uid);
-        return replyEmbed(createFieldEmbed('所持S',[
+        return replyEmbed(interaction, createFieldEmbed('所持S',[
           { name:'ユーザー', value:`<@${uid}>`, inline:true },
           { name:'残高', value:`${user.balance}S`, inline:true }
         ],'Gold'));
@@ -225,14 +228,14 @@ client.on('interactionCreate', async (interaction) => {
 
       if(choice==='check_history'){
         const res = await pool.query('SELECT * FROM history WHERE user_id=$1 ORDER BY created_at DESC LIMIT 5',[uid]);
-        if(!res.rows.length) return replyEmbed(createEmbed('履歴','取引履歴はありません','Grey'));
+        if(!res.rows.length) return replyEmbed(interaction, createEmbed('履歴','取引履歴はありません','Grey'));
         const fields = res.rows.map(r=>({ name:`${r.type} (${r.amount>0?'+':''}${r.amount}S)`, value:`${r.note||''} - ${new Date(r.created_at).toLocaleString()}` }));
-        return replyEmbed(createFieldEmbed('直近の履歴',fields,'Blue'));
+        return replyEmbed(interaction, createFieldEmbed('直近の履歴',fields,'Blue'));
       }
 
       if(choice==='lumma_create'){
         if(!ALLOWED_LUMMA_CHANNELS.includes(interaction.channelId)) 
-          return replyEmbed(createEmbed('エラー','このチャンネルではルムマを作成できません','Red'));
+          return replyEmbed(interaction, createEmbed('エラー','このチャンネルではルムマを作成できません','Red'));
 
         const modal = new Discord.ModalBuilder()
           .setCustomId('lumma_create_modal')
@@ -243,14 +246,12 @@ client.on('interactionCreate', async (interaction) => {
           );
         return interaction.showModal(modal);
       }
-
-      // ルムマ list/bet/close/my_bets 処理も同様に安全化して追加可能
     }
 
     // ---------- ルムマ作成モーダル ----------
     if(interaction.isModalSubmit() && interaction.customId==='lumma_create_modal'){
-      if(!member) return replyEmbed(createEmbed('エラー','サーバー内でのみ有効です','Red'));
-      await interaction.deferReply({ ephemeral:true });
+      if(!member) return replyEmbed(interaction, createEmbed('エラー','サーバー内でのみ有効です','Red'));
+      await interaction.deferReply({ flags: Discord.MessageFlags.Ephemeral });
 
       const raceName = interaction.fields.getTextInputValue('race_name');
       const horses = interaction.fields.getTextInputValue('horses').split(',').map(h=>h.trim()).filter(h=>h);
@@ -271,7 +272,7 @@ client.on('interactionCreate', async (interaction) => {
     if(interaction.deferred || interaction.replied){
       interaction.editReply({ embeds:[createEmbed('エラー','内部エラーが発生しました','Red')] }).catch(()=>{});
     } else {
-      interaction.reply({ embeds:[createEmbed('エラー','内部エラーが発生しました','Red')], ephemeral:true }).catch(()=>{});
+      interaction.reply({ embeds:[createEmbed('エラー','内部エラーが発生しました','Red')], flags: Discord.MessageFlags.Ephemeral }).catch(()=>{});
     }
   }
 });
