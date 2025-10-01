@@ -1,4 +1,4 @@
-// main_ui_env_ui.js
+// main_ui_neon.js
 import { Client, GatewayIntentBits, Partials,
   ActionRowBuilder, ButtonBuilder, ButtonStyle,
   ModalBuilder, TextInputBuilder, TextInputStyle,
@@ -43,20 +43,25 @@ const pool = new Pool({ connectionString: DATABASE_URL, ssl: { rejectUnauthorize
 // ------------------- DB初期化 -------------------
 async function initDB() {
   await pool.query(`
-    CREATE TABLE IF NOT EXISTS users (
+    CREATE TABLE IF NOT EXISTS coins (
       user_id TEXT PRIMARY KEY,
-      coins INT DEFAULT 0,
-      last_daily TIMESTAMP
+      balance INT DEFAULT 0
+    );
+  `);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS daily_claims (
+      user_id TEXT PRIMARY KEY,
+      last_claim DATE
     );
   `);
   await pool.query(`
     CREATE TABLE IF NOT EXISTS history (
       id SERIAL PRIMARY KEY,
-      user_id TEXT,
-      type TEXT,
-      amount INT,
-      info TEXT,
-      timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      user_id TEXT NOT NULL,
+      type TEXT NOT NULL,
+      amount INT NOT NULL,
+      note TEXT,
+      created_at TIMESTAMP DEFAULT NOW()
     );
   `);
   await pool.query(`
@@ -73,27 +78,27 @@ async function initDB() {
 }
 initDB();
 
-// ------------------- Helper Functions -------------------
+// ------------------- Helper -------------------
 async function getUser(userId) {
-  const res = await pool.query('SELECT * FROM users WHERE user_id=$1', [userId]);
+  const res = await pool.query('SELECT * FROM coins WHERE user_id=$1', [userId]);
   if (!res.rows.length) {
-    await pool.query('INSERT INTO users(user_id) VALUES($1)', [userId]);
-    return { user_id: userId, coins: 0, last_daily: null };
+    await pool.query('INSERT INTO coins(user_id) VALUES($1)', [userId]);
+    return { user_id: userId, balance: 0 };
   }
   return res.rows[0];
 }
 
-async function updateCoins(userId, amount, type='manual', info='') {
+async function updateCoins(userId, amount, type='manual', note='') {
   const user = await getUser(userId);
-  const newCoins = user.coins + amount;
-  await pool.query('UPDATE users SET coins=$1 WHERE user_id=$2', [newCoins, userId]);
-  await pool.query('INSERT INTO history(user_id,type,amount,info) VALUES($1,$2,$3,$4)', [userId,type,amount,info]);
-  return newCoins;
+  const newBalance = user.balance + amount;
+  await pool.query('UPDATE coins SET balance=$1 WHERE user_id=$2', [newBalance, userId]);
+  await pool.query('INSERT INTO history(user_id,type,amount,note) VALUES($1,$2,$3,$4)', [userId,type,amount,note]);
+  return newBalance;
 }
 
 // ------------------- デイリー報酬リセット -------------------
 schedule.scheduleJob('0 5 * * *', async () => {
-  await pool.query('UPDATE users SET last_daily=NULL');
+  await pool.query('UPDATE daily_claims SET last_claim=NULL');
   console.log('デイリー報酬リセット完了');
 });
 
@@ -109,7 +114,7 @@ client.on('messageCreate', async message => {
   spamCooldown[message.author.id] = now;
 
   const todayCount = await pool.query(
-    'SELECT COUNT(*) FROM history WHERE user_id=$1 AND type=$2 AND timestamp::date=CURRENT_DATE',
+    'SELECT COUNT(*) FROM history WHERE user_id=$1 AND type=$2 AND created_at::date=CURRENT_DATE',
     [message.author.id,'message']
   );
   if (todayCount.rows[0].count >= MESSAGE_LIMIT_NUM) return;
@@ -118,81 +123,67 @@ client.on('messageCreate', async message => {
 });
 
 // ------------------- UI Helper -------------------
-function dailyButtons() {
-  return new ActionRowBuilder<ButtonBuilder>().addComponents(
-    new ButtonBuilder().setCustomId('daily').setLabel('デイリー報酬').setStyle(ButtonStyle.Primary),
-    new ButtonBuilder().setCustomId('check_balance').setLabel('所持S確認').setStyle(ButtonStyle.Secondary)
-  );
-}
-function adminButton() {
-  return new ActionRowBuilder<ButtonBuilder>().addComponents(
-    new ButtonBuilder().setCustomId('admin_adjust').setLabel('コイン調整 (管理者)').setStyle(ButtonStyle.Danger)
-  );
-}
-function lummaButton() {
-  return new ActionRowBuilder<ButtonBuilder>().addComponents(
-    new ButtonBuilder().setCustomId('lumma_create').setLabel('ルムマ作成').setStyle(ButtonStyle.Success)
-  );
-}
-function createEmbed(title, description, color='Blue') {
-  return new EmbedBuilder().setTitle(title).setDescription(description).setColor(color);
-}
+const dailyButtons = () => new ActionRowBuilder<ButtonBuilder>().addComponents(
+  new ButtonBuilder().setCustomId('daily').setLabel('デイリー報酬').setStyle(ButtonStyle.Primary),
+  new ButtonBuilder().setCustomId('check_balance').setLabel('所持S確認').setStyle(ButtonStyle.Secondary)
+);
+const adminButton = () => new ActionRowBuilder<ButtonBuilder>().addComponents(
+  new ButtonBuilder().setCustomId('admin_adjust').setLabel('コイン調整 (管理者)').setStyle(ButtonStyle.Danger)
+);
+const lummaButton = () => new ActionRowBuilder<ButtonBuilder>().addComponents(
+  new ButtonBuilder().setCustomId('lumma_create').setLabel('ルムマ作成').setStyle(ButtonStyle.Success)
+);
+const createEmbed = (title, desc, color='Blue') => new EmbedBuilder().setTitle(title).setDescription(desc).setColor(color);
 
-// ------------------- Ready: 即UI送信 -------------------
+// ------------------- Ready -------------------
 client.once('ready', async () => {
   console.log(`Logged in as ${client.user.tag}`);
-
   try {
-    // デイリー用
     if (DAILY_CHANNEL_ID) {
-      const dailyChannel = await client.channels.fetch(DAILY_CHANNEL_ID);
-      if(dailyChannel?.isTextBased())
-        dailyChannel.send({ content:'デイリー報酬 & 所持S確認', components:[dailyButtons()] });
+      const ch = await client.channels.fetch(DAILY_CHANNEL_ID);
+      if(ch?.isTextBased()) ch.send({ content:'デイリー報酬 & 所持S確認', components:[dailyButtons()] });
     }
-
-    // 管理者用
     if (ADMIN_CHANNEL_ID) {
-      const adminChannel = await client.channels.fetch(ADMIN_CHANNEL_ID);
-      if(adminChannel?.isTextBased())
-        adminChannel.send({ content:'管理者用コイン操作', components:[adminButton()] });
+      const ch = await client.channels.fetch(ADMIN_CHANNEL_ID);
+      if(ch?.isTextBased()) ch.send({ content:'管理者用コイン操作', components:[adminButton()] });
     }
-
-    // ルムマ用
-    for(const cid of ALLOWED_LUMMA_CHANNELS){
+    for (const cid of ALLOWED_LUMMA_CHANNELS) {
       const ch = await client.channels.fetch(cid);
-      if(ch?.isTextBased())
-        ch.send({ content:'ルムマ作成', components:[lummaButton()] });
+      if(ch?.isTextBased()) ch.send({ content:'ルムマ作成', components:[lummaButton()] });
     }
-  } catch(e) {
-    console.error('UI送信エラー:', e);
-  }
+  } catch(e) { console.error('UI送信エラー:', e); }
 });
 
-// ------------------- Interaction Handler -------------------
+// ------------------- Interaction -------------------
 client.on('interactionCreate', async interaction => {
   const userId = interaction.user.id;
 
-  // ===== デイリー =====
+  // デイリー
   if(interaction.isButton() && interaction.customId==='daily'){
     if(interaction.channelId !== DAILY_CHANNEL_ID)
-      return interaction.reply({ content: 'このチャンネルでは使えません', ephemeral: true });
+      return interaction.reply({ content:'このチャンネルでは使えません', ephemeral:true });
 
-    const user = await getUser(userId);
-    if(user.last_daily && new Date(user.last_daily).toDateString() === new Date().toDateString())
-      return interaction.reply({ content: '今日のデイリーは取得済み', ephemeral: true });
+    const res = await pool.query('SELECT last_claim FROM daily_claims WHERE user_id=$1', [userId]);
+    const last = res.rows[0]?.last_claim;
+    if(last && new Date(last).toDateString() === new Date().toDateString())
+      return interaction.reply({ content:'今日のデイリーは取得済み', ephemeral:true });
 
     await updateCoins(userId, DAILY_AMOUNT_NUM, 'daily', 'デイリー報酬');
-    await pool.query('UPDATE users SET last_daily=$1 WHERE user_id=$2', [new Date(), userId]);
+    await pool.query(`
+      INSERT INTO daily_claims(user_id,last_claim) VALUES($1,CURRENT_DATE)
+      ON CONFLICT (user_id) DO UPDATE SET last_claim=CURRENT_DATE
+    `, [userId]);
+
     return interaction.reply({ embeds:[createEmbed('デイリー取得', `デイリー ${DAILY_AMOUNT_NUM}S 取得!`)], ephemeral:true });
   }
 
-  // ===== 所持S確認 =====
+  // 所持S確認
   if(interaction.isButton() && interaction.customId==='check_balance'){
     const user = await getUser(userId);
-    return interaction.reply({ embeds:[createEmbed('所持S', `所持S: ${user.coins}S`)], ephemeral:true });
+    return interaction.reply({ embeds:[createEmbed('所持S', `所持S: ${user.balance}S`)], ephemeral:true });
   }
 
-  // ===== 管理者 =====
+  // 管理者
   if(interaction.isButton() && interaction.customId==='admin_adjust'){
     if(interaction.channelId !== ADMIN_CHANNEL_ID || !interaction.member.permissions.has(PermissionsBitField.Flags.Administrator)) return;
 
@@ -210,17 +201,15 @@ client.on('interactionCreate', async interaction => {
     return interaction.showModal(modal);
   }
   if(interaction.isModalSubmit() && interaction.customId==='adjust_modal'){
-    if(interaction.channelId !== ADMIN_CHANNEL_ID || !interaction.member.permissions.has(PermissionsBitField.Flags.Administrator)) return;
-
     const targetId = interaction.fields.getTextInputValue('target_user');
     const amount = parseInt(interaction.fields.getTextInputValue('amount'));
-    if(isNaN(amount)) return interaction.reply({ content: '数値を入力してください', ephemeral: true });
+    if(isNaN(amount)) return interaction.reply({ content:'数値を入力してください', ephemeral:true });
 
     const newBalance = await updateCoins(targetId, amount, 'admin', `管理者操作 by ${userId}`);
     return interaction.reply({ embeds:[createEmbed('コイン調整完了', `ユーザー ${targetId} の所持Sを ${newBalance}S に更新`, 'Green')], ephemeral:true });
   }
 
-  // ===== ルムマ =====
+  // ルムマ
   if(ALLOWED_LUMMA_CHANNELS.includes(interaction.channelId)){
     if(interaction.isButton() && interaction.customId==='lumma_create'){
       const modal = new ModalBuilder()
@@ -244,18 +233,17 @@ client.on('interactionCreate', async interaction => {
       const entrants = parseInt(interaction.fields.getTextInputValue('entrants'));
       const betCoins = parseInt(interaction.fields.getTextInputValue('bet_coins'));
 
-      if(isNaN(entrants) || entrants < 2 || entrants > 18)
+      if(isNaN(entrants) || entrants <2 || entrants>18)
         return interaction.reply({ content:'出走人数は2~18人で入力してください', ephemeral:true });
-      if(isNaN(betCoins) || betCoins <= 0)
+      if(isNaN(betCoins) || betCoins<=0)
         return interaction.reply({ content:'賭けコインは1以上で入力してください', ephemeral:true });
 
       const user = await getUser(userId);
-      if(user.coins < betCoins)
+      if(user.balance < betCoins)
         return interaction.reply({ content:'所持コインが足りません', ephemeral:true });
 
       await updateCoins(userId, -betCoins, 'lumma', `ルムマ作成: ${raceName} 賭け ${betCoins}S`);
-      await pool.query(
-        'INSERT INTO lumma_races(channel_id,host_id,race_name,entrants,bet_coins) VALUES($1,$2,$3,$4,$5)',
+      await pool.query('INSERT INTO lumma_races(channel_id,host_id,race_name,entrants,bet_coins) VALUES($1,$2,$3,$4,$5)',
         [interaction.channelId,userId,raceName,entrants,betCoins]
       );
       return interaction.reply({ embeds:[createEmbed('ルムマ作成完了', `レース "${raceName}" 作成 完了。\n出走人数: ${entrants}\n賭けコイン: ${betCoins}S`, 'Gold')] });
@@ -263,12 +251,12 @@ client.on('interactionCreate', async interaction => {
   }
 });
 
-// ------------------- HTTP サーバー -------------------
+// ------------------- HTTP Server -------------------
 const PORT = process.env.PORT || 10000;
 http.createServer((req,res)=>{
   res.writeHead(200, {'Content-Type':'text/plain'});
   res.end('Bot is running\n');
 }).listen(PORT, ()=>console.log(`HTTP server running on port ${PORT}`));
 
-// ------------------- Bot Login -------------------
+// ------------------- Login -------------------
 client.login(DISCORD_TOKEN);
