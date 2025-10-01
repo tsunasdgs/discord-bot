@@ -93,7 +93,7 @@ const createFieldEmbed = (title, fields, color='Blue') =>
 const createRow = (components) => new Discord.ActionRowBuilder().addComponents(components);
 
 const checkRole = async (member) => {
-  if(!ALLOWED_ROLES.length) return true; // 設定なしなら制限なし
+  if(!ALLOWED_ROLES.length) return true;
   return member.roles.cache.some(r=>ALLOWED_ROLES.includes(r.id));
 };
 
@@ -177,24 +177,23 @@ client.on('interactionCreate', async (interaction) => {
   const member = await interaction.guild.members.fetch(uid);
   const replyEmbed = (emb)=> interaction.reply({ embeds:[emb], ephemeral:true });
 
-  // 全ルムマ操作は権限チェック
-  const lummaInteractions = ['lumma_create','lumma_list','lumma_bet','lumma_close','lumma_my_bets'];
-  if((interaction.isStringSelectMenu() && lummaInteractions.includes(interaction.customId)) || 
+  // 権限チェック
+  const restrictedInteractions = ['lumma_create','lumma_list','lumma_bet','lumma_close','lumma_my_bets'];
+  if(((interaction.isStringSelectMenu() && restrictedInteractions.includes(interaction.customId)) || 
      (interaction.isModalSubmit() && interaction.customId.startsWith('lumma_create_modal')) ||
      (interaction.isStringSelectMenu() && interaction.customId.startsWith('select_race')) ||
      (interaction.isStringSelectMenu() && interaction.customId.startsWith('bet_')) ||
      (interaction.isModalSubmit() && interaction.customId.startsWith('bet_amount_')) ||
-     (interaction.isStringSelectMenu() && interaction.customId.startsWith('close_'))){
-    if(!await checkRole(member)){
-      return replyEmbed(createEmbed('権限エラー','この操作は許可ロールが必要です','Red'));
-    }
+     (interaction.isStringSelectMenu() && interaction.customId.startsWith('close_')))
+     && !await checkRole(member)){
+    return replyEmbed(createEmbed('権限エラー','この操作は許可ロールが必要です','Red'));
   }
 
-  // ---------------- メインメニュー ----------------
+  // ---------- メインメニュー ----------
   if(interaction.isStringSelectMenu() && interaction.customId==='main_menu'){
     const choice = interaction.values[0];
 
-    // --- デイリー報酬 ---
+    // デイリー報酬
     if(choice==='daily'){
       const res = await pool.query('SELECT last_claim FROM daily_claims WHERE user_id=$1',[uid]);
       const last = res.rows[0]?.last_claim;
@@ -206,7 +205,7 @@ client.on('interactionCreate', async (interaction) => {
       return replyEmbed(createEmbed('デイリー取得',`デイリー ${DAILY_AMOUNT_NUM}S 取得!`,'Green'));
     }
 
-    // --- 残高確認 ---
+    // 残高確認
     if(choice==='check_balance'){
       const user = await getUser(uid);
       return replyEmbed(createFieldEmbed('所持S',[
@@ -215,7 +214,7 @@ client.on('interactionCreate', async (interaction) => {
       ],'Gold'));
     }
 
-    // --- 履歴確認 ---
+    // 履歴確認
     if(choice==='check_history'){
       const res = await pool.query('SELECT * FROM history WHERE user_id=$1 ORDER BY created_at DESC LIMIT 5',[uid]);
       if(!res.rows.length) return replyEmbed(createEmbed('履歴','取引履歴はありません','Grey'));
@@ -226,7 +225,7 @@ client.on('interactionCreate', async (interaction) => {
       return replyEmbed(createFieldEmbed('直近の履歴',fields,'Blue'));
     }
 
-    // --- ルムマ作成モーダル ---
+    // ルムマ作成
     if(choice==='lumma_create'){
       const modal = new Discord.ModalBuilder()
         .setCustomId('lumma_create_modal').setTitle('ルムマレース作成')
@@ -237,7 +236,7 @@ client.on('interactionCreate', async (interaction) => {
       return interaction.showModal(modal);
     }
 
-    // --- ルムマ一覧 ---
+    // ルムマ一覧
     if(choice==='lumma_list'){
       const racesRes = await pool.query('SELECT * FROM lumma_races WHERE is_closed=false ORDER BY created_at DESC');
       if(!racesRes.rows.length) return replyEmbed(createEmbed('通知','開催中のレースはありません','Yellow'));
@@ -245,7 +244,7 @@ client.on('interactionCreate', async (interaction) => {
       return replyEmbed(createFieldEmbed('開催中のルムマ',fields,'Purple'));
     }
 
-    // --- 自分の賭け状況 ---
+    // 自分の賭け状況
     if(choice==='lumma_my_bets'){
       const myBets = await pool.query('SELECT l.race_name, b.horse_name, b.bet_amount FROM lumma_bets b JOIN lumma_races l ON b.race_id=l.id WHERE b.user_id=$1 AND l.is_closed=false',[uid]);
       if(!myBets.rows.length) return replyEmbed(createEmbed('通知','現在の賭けはありません','Yellow'));
@@ -253,7 +252,7 @@ client.on('interactionCreate', async (interaction) => {
       return replyEmbed(createFieldEmbed('自分の賭け状況',fields,'Green'));
     }
 
-    // --- 馬に賭ける ---
+    // 馬に賭ける
     if(choice==='lumma_bet'){
       const racesRes = await pool.query('SELECT * FROM lumma_races WHERE is_closed=false ORDER BY created_at DESC');
       if(!racesRes.rows.length) return replyEmbed(createEmbed('エラー','賭け可能なレースはありません','Red'));
@@ -262,7 +261,7 @@ client.on('interactionCreate', async (interaction) => {
       return interaction.reply({ content:'賭けたいレースを選択してください', components:[createRow([select])], ephemeral:true });
     }
 
-    // --- 勝者報告 ---
+    // 勝者報告
     if(choice==='lumma_close'){
       const res = await pool.query('SELECT * FROM lumma_races WHERE host_id=$1 AND is_closed=false ORDER BY created_at DESC LIMIT 1',[uid]);
       const race = res.rows[0];
@@ -275,25 +274,25 @@ client.on('interactionCreate', async (interaction) => {
     }
   }
 
-  // --- レース選択後、賭け馬選択 ---
+  // ---------- レース選択後 ----------
   if(interaction.isStringSelectMenu() && interaction.customId==='select_race'){
     const raceId = interaction.values[0];
-    const race = await pool.query('SELECT * FROM lumma_races WHERE id=$1',[raceId]);
-    if(!race.rows.length) return replyEmbed(createEmbed('エラー','レースが見つかりません','Red'));
+    const raceRes = await pool.query('SELECT * FROM lumma_races WHERE id=$1',[raceId]);
+    if(!raceRes.rows.length) return replyEmbed(createEmbed('エラー','レースが見つかりません','Red'));
+    const race = raceRes.rows[0];
 
     const betsRes = await pool.query('SELECT horse_name, SUM(bet_amount) as total FROM lumma_bets WHERE race_id=$1 GROUP BY horse_name',[raceId]);
+    if(!betsRes.rows.length) return replyEmbed(createEmbed('通知','まだ馬が登録されていません','Yellow'));
     const totalPool = betsRes.rows.reduce((sum,row)=> sum+Number(row.total),0);
     const horses = betsRes.rows.map(r=>({ label:r.horse_name, value:r.horse_name }));
-    if(!horses.length) return replyEmbed(createEmbed('通知','まだ馬が登録されていません','Yellow'));
-
     return interaction.reply({
-      content:`レース: ${race.rows[0].race_name}\nオッズ目安: ${betsRes.rows.map(r=>`${r.horse_name}: ${(totalPool/r.total).toFixed(2)}倍`).join('\n')}`,
+      content:`レース: ${race.race_name}\nオッズ目安: ${betsRes.rows.map(r=>`${r.horse_name}: ${(totalPool/r.total).toFixed(2)}倍`).join('\n')}`,
       components:[createRow([new Discord.StringSelectMenuBuilder().setCustomId(`bet_${raceId}`).setPlaceholder('馬を選択').addOptions(horses)])],
       ephemeral:true
     });
   }
 
-  // --- 馬に賭ける処理 ---
+  // ---------- 馬に賭ける ----------
   if(interaction.isStringSelectMenu() && interaction.customId.startsWith('bet_')){
     const raceId = interaction.customId.replace('bet_','');
     const horse = interaction.values[0];
@@ -307,19 +306,19 @@ client.on('interactionCreate', async (interaction) => {
   }
 
   if(interaction.isModalSubmit() && interaction.customId.startsWith('bet_amount_')){
+    await interaction.deferReply({ ephemeral:true });
     const [_, raceId, horse] = interaction.customId.split('_');
     const amount = parseInt(interaction.fields.getTextInputValue('amount'));
-    if(isNaN(amount) || amount<=0) return replyEmbed(createEmbed('エラー','正しい金額を入力してください','Red'));
+    if(isNaN(amount)||amount<=0) return interaction.editReply({ embeds:[createEmbed('エラー','正しい金額を入力してください','Red')] });
     const user = await getUser(uid);
-    if(user.balance < amount) return replyEmbed(createEmbed('エラー','所持コインが足りません','Red'));
+    if(user.balance < amount) return interaction.editReply({ embeds:[createEmbed('エラー','所持コインが足りません','Red')] });
 
     await updateCoins(uid,-amount,'lumma_bet',`ルムマ賭け ${horse} ${amount}S`);
-    await pool.query('INSERT INTO lumma_bets(race_id,user_id,horse_name,bet_amount) VALUES($1,$2,$3,$4)',
-      [raceId, uid, horse, amount]);
-    return replyEmbed(createEmbed('賭け完了',`${horse} に ${amount}S 賭けました`,'Green'));
+    await pool.query('INSERT INTO lumma_bets(race_id,user_id,horse_name,bet_amount) VALUES($1,$2,$3,$4)',[raceId, uid, horse, amount]);
+    return interaction.editReply({ embeds:[createEmbed('賭け完了',`${horse} に ${amount}S 賭けました`,'Green')] });
   }
 
-  // --- 勝者確定処理 ---
+  // ---------- 勝者確定 ----------
   if(interaction.isStringSelectMenu() && interaction.customId.startsWith('close_')){
     const raceId = interaction.customId.replace('close_','');
     const winnerHorse = interaction.values[0];
