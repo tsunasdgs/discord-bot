@@ -1,5 +1,9 @@
-// main.js (Render + Neon + UMA仕様 + WebService対応 + 安全版)
-import { Client, GatewayIntentBits, Partials, ActionRowBuilder, ModalBuilder, TextInputBuilder, TextInputStyle } from 'discord.js';
+// main_ui_refactored.js
+import { Client, GatewayIntentBits, Partials,
+  ActionRowBuilder, ButtonBuilder, ButtonStyle,
+  ModalBuilder, TextInputBuilder, TextInputStyle,
+  EmbedBuilder, PermissionsBitField
+} from 'discord.js';
 import { Pool } from 'pg';
 import schedule from 'node-schedule';
 import dotenv from 'dotenv';
@@ -9,7 +13,7 @@ dotenv.config();
 // ------------------- Client -------------------
 const client = new Client({
   intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent],
-  partials: [Partials.Channel],
+  partials: [Partials.Channel, Partials.Message],
 });
 
 // ------------------- Config -------------------
@@ -113,16 +117,48 @@ client.on('messageCreate', async message => {
   await updateCoins(message.author.id, MESSAGE_AMOUNT_NUM, 'message', '発言報酬');
 });
 
+// ------------------- UIヘルパー -------------------
+function dailyButtons() {
+  return new ActionRowBuilder<ButtonBuilder>().addComponents(
+    new ButtonBuilder().setCustomId('daily').setLabel('デイリー報酬').setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId('check_balance').setLabel('所持S確認').setStyle(ButtonStyle.Secondary)
+  );
+}
+function adminButton() {
+  return new ActionRowBuilder<ButtonBuilder>().addComponents(
+    new ButtonBuilder().setCustomId('admin_adjust').setLabel('コイン調整 (管理者)').setStyle(ButtonStyle.Danger)
+  );
+}
+function lummaButton() {
+  return new ActionRowBuilder<ButtonBuilder>().addComponents(
+    new ButtonBuilder().setCustomId('lumma_create').setLabel('ルムマ作成').setStyle(ButtonStyle.Success)
+  );
+}
+function createEmbed(title, description, color='Blue') {
+  return new EmbedBuilder().setTitle(title).setDescription(description).setColor(color);
+}
+
 // ------------------- Bot Ready -------------------
-client.once('ready', () => {
+client.once('ready', async () => {
   console.log(`Logged in as ${client.user.tag}`);
+
+  const dailyChannel = await client.channels.fetch(DAILY_CHANNEL_ID);
+  if(dailyChannel?.isTextBased()) dailyChannel.send({ content:'デイリー報酬 & 所持S確認', components:[dailyButtons()] });
+
+  const adminChannel = await client.channels.fetch(ADMIN_CHANNEL_ID);
+  if(adminChannel?.isTextBased()) adminChannel.send({ content:'管理者用コイン操作', components:[adminButton()] });
+
+  for(const cid of ALLOWED_LUMMA_CHANNELS){
+    const ch = await client.channels.fetch(cid);
+    if(ch?.isTextBased()) ch.send({ content:'ルムマ作成', components:[lummaButton()] });
+  }
 });
 
 // ------------------- Interaction Handler -------------------
 client.on('interactionCreate', async interaction => {
   const userId = interaction.user.id;
 
-  // デイリー報酬
+  // ===== デイリー報酬 =====
   if(interaction.isButton() && interaction.customId==='daily'){
     if(interaction.channelId !== DAILY_CHANNEL_ID)
       return interaction.reply({ content: 'このチャンネルでは使えません', ephemeral: true });
@@ -133,18 +169,18 @@ client.on('interactionCreate', async interaction => {
 
     await updateCoins(userId, DAILY_AMOUNT_NUM, 'daily', 'デイリー報酬');
     await pool.query('UPDATE users SET last_daily=$1 WHERE user_id=$2', [new Date(), userId]);
-    return interaction.reply({ content: `デイリー ${DAILY_AMOUNT_NUM}S 取得!`, ephemeral: true });
+    return interaction.reply({ embeds:[createEmbed('デイリー取得', `デイリー ${DAILY_AMOUNT_NUM}S 取得!`)], ephemeral:true });
   }
 
-  // 所持S確認
+  // ===== 所持S確認 =====
   if(interaction.isButton() && interaction.customId==='check_balance'){
     const user = await getUser(userId);
-    return interaction.reply({ content: `所持S: ${user.coins}S`, ephemeral: true });
+    return interaction.reply({ embeds:[createEmbed('所持S', `所持S: ${user.coins}S`)], ephemeral:true });
   }
 
-  // 管理者コイン操作
+  // ===== 管理者コイン操作 =====
   if(interaction.isButton() && interaction.customId==='admin_adjust'){
-    if(interaction.channelId !== ADMIN_CHANNEL_ID || !interaction.member.permissions.has('Administrator')) return;
+    if(interaction.channelId !== ADMIN_CHANNEL_ID || !interaction.member.permissions.has(PermissionsBitField.Flags.Administrator)) return;
 
     const modal = new ModalBuilder()
       .setCustomId('adjust_modal')
@@ -159,19 +195,18 @@ client.on('interactionCreate', async interaction => {
       );
     return interaction.showModal(modal);
   }
-
   if(interaction.isModalSubmit() && interaction.customId==='adjust_modal'){
-    if(interaction.channelId !== ADMIN_CHANNEL_ID || !interaction.member.permissions.has('Administrator')) return;
+    if(interaction.channelId !== ADMIN_CHANNEL_ID || !interaction.member.permissions.has(PermissionsBitField.Flags.Administrator)) return;
 
     const targetId = interaction.fields.getTextInputValue('target_user');
     const amount = parseInt(interaction.fields.getTextInputValue('amount'));
     if(isNaN(amount)) return interaction.reply({ content: '数値を入力してください', ephemeral: true });
 
     const newBalance = await updateCoins(targetId, amount, 'admin', `管理者操作 by ${userId}`);
-    return interaction.reply({ content: `ユーザー ${targetId} の所持Sを ${newBalance}S に更新`, ephemeral: true });
+    return interaction.reply({ embeds:[createEmbed('コイン調整完了', `ユーザー ${targetId} の所持Sを ${newBalance}S に更新`, 'Green')], ephemeral:true });
   }
 
-  // ルムマ作成
+  // ===== ルムマ作成 =====
   if(ALLOWED_LUMMA_CHANNELS.includes(interaction.channelId)){
     if(interaction.isButton() && interaction.customId==='lumma_create'){
       const modal = new ModalBuilder()
@@ -190,7 +225,6 @@ client.on('interactionCreate', async interaction => {
         );
       return interaction.showModal(modal);
     }
-
     if(interaction.isModalSubmit() && interaction.customId==='lumma_create_modal'){
       const raceName = interaction.fields.getTextInputValue('race_name');
       const entrants = parseInt(interaction.fields.getTextInputValue('entrants'));
@@ -198,7 +232,6 @@ client.on('interactionCreate', async interaction => {
 
       if(isNaN(entrants) || entrants < 2 || entrants > 18)
         return interaction.reply({ content:'出走人数は2~18人で入力してください', ephemeral:true });
-
       if(isNaN(betCoins) || betCoins <= 0)
         return interaction.reply({ content:'賭けコインは1以上で入力してください', ephemeral:true });
 
@@ -211,8 +244,7 @@ client.on('interactionCreate', async interaction => {
         'INSERT INTO lumma_races(channel_id,host_id,race_name,entrants,bet_coins) VALUES($1,$2,$3,$4,$5)',
         [interaction.channelId,userId,raceName,entrants,betCoins]
       );
-
-      return interaction.reply({ content:`レース "${raceName}" 作成 完了。出走人数: ${entrants} 賭けコイン: ${betCoins}S`, ephemeral:false });
+      return interaction.reply({ embeds:[createEmbed('ルムマ作成完了', `レース "${raceName}" 作成 完了。\n出走人数: ${entrants}\n賭けコイン: ${betCoins}S`, 'Gold')] });
     }
   }
 });
