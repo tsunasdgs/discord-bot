@@ -11,11 +11,13 @@ const ALLOWED_CHANNELS = [process.env.RUMMA_CHANNEL_ID];
 let users = {}; // { userId: { balance: 1000 } }
 let races = {}; // { raceId: { name, hostId, status, horses, bets } }
 
+// --- ユーザー取得/初期化 ---
 function getUser(userId) {
   if (!users[userId]) users[userId] = { balance: 1000 };
   return users[userId];
 }
 
+// --- オッズ計算 ---
 function calculateOdds(race) {
   const total = race.bets.reduce((sum, b) => sum + b.amount, 0);
   const horseTotals = {};
@@ -28,6 +30,7 @@ function calculateOdds(race) {
   return odds;
 }
 
+// --- 配当計算 ---
 function distributeWinnings(race, winnerId) {
   const odds = calculateOdds(race);
   race.bets.forEach(b => {
@@ -39,6 +42,42 @@ function distributeWinnings(race, winnerId) {
       b.payout = 0;
     }
   });
+}
+
+// --- レース作成 ---
+export function createRace(name, hostId, horseNames) {
+  const raceId = uuidv4();
+  races[raceId] = {
+    name,
+    hostId,
+    status: 'open',
+    horses: horseNames.map((name, idx) => ({ id: String(idx), name })),
+    bets: []
+  };
+  return raceId;
+}
+
+// --- レースUIを指定チャンネルに送信 ---
+export function sendRaceUI(channel, raceId) {
+  const race = races[raceId];
+  if (!race) return;
+
+  const embed = new EmbedBuilder()
+    .setTitle(`ルムマ: ${race.name}`)
+    .setDescription(race.horses.map(h => `- ${h.name}`).join('\n'))
+    .setColor('Green');
+
+  const row = new ActionRowBuilder();
+  race.horses.forEach(h => {
+    row.addComponents(
+      new ButtonBuilder()
+        .setCustomId(`bet_${raceId}_${h.id}`)
+        .setLabel(`単勝: ${h.name}`)
+        .setStyle(ButtonStyle.Primary)
+    );
+  });
+
+  channel.send({ embeds: [embed], components: [row] });
 }
 
 // ---- ルムマ用 Interaction handler ----
@@ -69,26 +108,6 @@ export async function handleInteraction(interaction) {
           )
         );
       return interaction.showModal(modal);
-    }
-
-    if (action === 'start') {
-      if (!race || race.status !== 'open') {
-        return interaction.reply({ content: '投票はすでに開始済みです。', ephemeral: true });
-      }
-      const embed = new EmbedBuilder()
-        .setTitle(`ルムマ: ${race.name}`)
-        .setDescription(race.horses.map(h=>`- ${h.name}`).join('\n'))
-        .setColor('Green');
-      const row = new ActionRowBuilder();
-      race.horses.forEach(h => 
-        row.addComponents(
-          new ButtonBuilder()
-            .setCustomId(`bet_${raceId}_${h.id}`)
-            .setLabel(`単勝: ${h.name}`)
-            .setStyle(ButtonStyle.Primary)
-        )
-      );
-      return interaction.update({ embeds: [embed], components: [row] });
     }
 
     if (action === 'close') {
