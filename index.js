@@ -1,4 +1,3 @@
-// ---------------- index.js ----------------
 import Discord from 'discord.js';
 import pkg from 'pg';
 import schedule from 'node-schedule';
@@ -8,7 +7,6 @@ import http from 'http';
 const { Pool } = pkg;
 dotenv.config();
 
-// ---------------- Env ----------------
 const {
   DISCORD_TOKEN,
   DATABASE_URL,
@@ -114,7 +112,10 @@ client.on('messageCreate', async (msg) => {
   if(now - (spamCooldown[msg.author.id]||0) < MESSAGE_COOLDOWN_MS) return;
   spamCooldown[msg.author.id] = now;
 
-  const countRes = await pool.query('SELECT COUNT(*) FROM history WHERE user_id=$1 AND type=$2 AND created_at::date=CURRENT_DATE',[msg.author.id,'message']);
+  const countRes = await pool.query(
+    'SELECT COUNT(*) FROM history WHERE user_id=$1 AND type=$2 AND created_at::date=CURRENT_DATE',
+    [msg.author.id,'message']
+  );
   if(countRes.rows[0].count >= MESSAGE_LIMIT_NUM) return;
 
   await updateCoins(msg.author.id, MESSAGE_AMOUNT_NUM,'message','発言報酬');
@@ -126,6 +127,7 @@ const payWinners = async (raceId, winnerHorse) => {
   const totalPool = betsRes.rows.reduce((sum,row)=> sum+row.bet_amount,0);
   const winnerBets = betsRes.rows.filter(b=>b.horse_name===winnerHorse);
   const totalWinnerBets = winnerBets.reduce((sum,row)=> sum+row.bet_amount,0);
+
   for(const bet of winnerBets){
     const payout = Math.floor(bet.bet_amount / totalWinnerBets * totalPool);
     await updateCoins(bet.user_id,payout,'lumma_win',`ルムマ勝利: ${winnerHorse} (${payout}S)`);
@@ -135,7 +137,10 @@ const payWinners = async (raceId, winnerHorse) => {
 
 // ---------------- UI ----------------
 const dailyButton = new Discord.ActionRowBuilder().addComponents(
-  new Discord.ButtonBuilder().setCustomId('daily_claim').setLabel('💰 デイリー報酬取得').setStyle(Discord.ButtonStyle.Primary)
+  new Discord.ButtonBuilder()
+    .setCustomId('daily_claim')
+    .setLabel('💰 デイリー報酬取得')
+    .setStyle(Discord.ButtonStyle.Primary)
 );
 
 const mainMenu = () => createRow([
@@ -167,14 +172,14 @@ client.once('ready', async () => {
 // ---------------- Interaction ----------------
 client.on('interactionCreate', async (interaction) => {
   const uid = interaction.user.id;
-
   try {
-    const member = await interaction.guild.members.fetch(uid);
+    const member = interaction.guild ? await interaction.guild.members.fetch(uid) : null;
+
     const replyEmbed = async (emb) => {
-      if (interaction.deferred || interaction.replied) {
-        return interaction.editReply({ embeds: [emb] }).catch(()=>{});
+      if(interaction.deferred || interaction.replied){
+        return interaction.editReply({ embeds:[emb] }).catch(()=>{});
       } else {
-        return interaction.reply({ embeds: [emb], ephemeral: true }).catch(()=>{});
+        return interaction.reply({ embeds:[emb], ephemeral:true }).catch(()=>{});
       }
     };
 
@@ -186,21 +191,24 @@ client.on('interactionCreate', async (interaction) => {
         (interaction.isStringSelectMenu() && interaction.customId.startsWith('bet_')) ||
         (interaction.isModalSubmit() && interaction.customId.startsWith('bet_amount_')) ||
         (interaction.isStringSelectMenu() && interaction.customId.startsWith('close_')))
-       && !await checkRole(member)){
+       && !(member && await checkRole(member))){
       return replyEmbed(createEmbed('権限エラー','この操作は許可ロールが必要です','Red'));
     }
 
     // ---------- デイリーボタン ----------
     if(interaction.isButton() && interaction.customId==='daily_claim'){
+      if(!member) return replyEmbed(createEmbed('エラー','サーバー内でのみ有効です','Red'));
+      await interaction.deferReply({ ephemeral:true });
+
       const res = await pool.query('SELECT last_claim FROM daily_claims WHERE user_id=$1',[uid]);
       const last = res.rows[0]?.last_claim;
       if(last && new Date(last).toDateString()===new Date().toDateString())
-        return replyEmbed(createEmbed('通知','今日のデイリーは取得済み'));
+        return interaction.editReply({ embeds:[createEmbed('通知','今日のデイリーは取得済み')] });
 
       await updateCoins(uid,DAILY_AMOUNT_NUM,'daily','デイリー報酬');
       await pool.query(`INSERT INTO daily_claims(user_id,last_claim) VALUES($1,CURRENT_DATE)
                         ON CONFLICT (user_id) DO UPDATE SET last_claim=CURRENT_DATE`,[uid]);
-      return replyEmbed(createEmbed('デイリー取得',`デイリー ${DAILY_AMOUNT_NUM}S 取得!`,'Green'));
+      return interaction.editReply({ embeds:[createEmbed('デイリー取得',`デイリー ${DAILY_AMOUNT_NUM}S 取得!`,'Green')] });
     }
 
     // ---------- メインメニュー ----------
@@ -236,11 +244,12 @@ client.on('interactionCreate', async (interaction) => {
         return interaction.showModal(modal);
       }
 
-      // ...ここに既存ルムマ list/bet/close/my_bets の処理を安全に追加...
+      // ルムマ list/bet/close/my_bets 処理も同様に安全化して追加可能
     }
 
     // ---------- ルムマ作成モーダル ----------
     if(interaction.isModalSubmit() && interaction.customId==='lumma_create_modal'){
+      if(!member) return replyEmbed(createEmbed('エラー','サーバー内でのみ有効です','Red'));
       await interaction.deferReply({ ephemeral:true });
 
       const raceName = interaction.fields.getTextInputValue('race_name');
@@ -257,7 +266,7 @@ client.on('interactionCreate', async (interaction) => {
       return interaction.editReply({ embeds:[createEmbed('ルムマ作成完了',`レース: ${raceName}\n出走馬: ${horses.join(', ')}`,'Green')] });
     }
 
-  } catch (err) {
+  } catch(err) {
     console.error('interaction error:', err);
     if(interaction.deferred || interaction.replied){
       interaction.editReply({ embeds:[createEmbed('エラー','内部エラーが発生しました','Red')] }).catch(()=>{});
