@@ -2,17 +2,15 @@ import Discord from 'discord.js';
 import dotenv from 'dotenv';
 import http from 'http';
 import { initDB } from './db.js';
-import { dailyButtons, lummaButtons, adminButtons } from './ui.js';
 import * as Coin from './coin.js';
 import * as Rumma from './rumma.js';
+import { dailyButtons, lummaButtons, adminButtons } from './ui.js';
 
 dotenv.config();
 
-const client = new Discord.Client({ intents:[
-  Discord.GatewayIntentBits.Guilds,
-  Discord.GatewayIntentBits.GuildMessages,
-  Discord.GatewayIntentBits.MessageContent
-]});
+const client = new Discord.Client({
+  intents: [Discord.GatewayIntentBits.Guilds, Discord.GatewayIntentBits.GuildMessages, Discord.GatewayIntentBits.MessageContent]
+});
 
 const { DAILY_CHANNEL_ID, ADMIN_CHANNEL_ID, RUMMA_CHANNELS, PORT=10000 } = process.env;
 const ALLOWED_RUMMA_CHANNELS = RUMMA_CHANNELS?.split(',').map(c=>c.trim()) || [];
@@ -48,7 +46,7 @@ client.on('interactionCreate', async interaction=>{
     }
 
     if(interaction.isModalSubmit()){
-      // モーダル処理も同様に deferReply + DB処理
+      // モーダル送信処理も同様に安全に deferReply + DB操作
     }
 
   }catch(e){

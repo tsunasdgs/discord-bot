@@ -1,5 +1,5 @@
 import { pool } from './db.js';
-import { createEmbed, createFieldEmbed, lummaButtons } from './ui.js';
+import { createEmbed, createFieldEmbed } from './ui.js';
 import Discord from 'discord.js';
 
 export async function handleLummaButton(interaction){
