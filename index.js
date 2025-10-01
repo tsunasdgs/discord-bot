@@ -1,17 +1,14 @@
-// main.js (Render + Neon + UMA仕様 完全版)
-import { Client, GatewayIntentBits, Partials, ActionRowBuilder, ButtonBuilder, ButtonStyle, ModalBuilder, TextInputBuilder, TextInputStyle, EmbedBuilder } from 'discord.js';
+// main.js (Render + Neon + UMA仕様 + WebService対応 + 安全版)
+import { Client, GatewayIntentBits, Partials, ActionRowBuilder, ModalBuilder, TextInputBuilder, TextInputStyle } from 'discord.js';
 import { Pool } from 'pg';
 import schedule from 'node-schedule';
 import dotenv from 'dotenv';
+import http from 'http';
 dotenv.config();
 
 // ------------------- Client -------------------
 const client = new Client({
-  intents: [
-    GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent
-  ],
+  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent],
   partials: [Partials.Channel],
 });
 
@@ -36,11 +33,8 @@ const MESSAGE_LIMIT_NUM = Number(MESSAGE_LIMIT);
 const FORBIDDEN_WORDS = ['ああ','いい','AA'];
 const MESSAGE_COOLDOWN_MS = 60000;
 
-// ------------------- Database (Neon) -------------------
-const pool = new Pool({
-  connectionString: DATABASE_URL,
-  ssl: { rejectUnauthorized: false }
-});
+// ------------------- Database -------------------
+const pool = new Pool({ connectionString: DATABASE_URL, ssl: { rejectUnauthorized: false } });
 
 // ------------------- DB初期化 -------------------
 async function initDB() {
@@ -51,7 +45,6 @@ async function initDB() {
       last_daily TIMESTAMP
     );
   `);
-
   await pool.query(`
     CREATE TABLE IF NOT EXISTS history (
       id SERIAL PRIMARY KEY,
@@ -62,7 +55,6 @@ async function initDB() {
       timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
   `);
-
   await pool.query(`
     CREATE TABLE IF NOT EXISTS lumma_races (
       id SERIAL PRIMARY KEY,
@@ -105,7 +97,6 @@ schedule.scheduleJob('0 5 * * *', async () => {
 const spamCooldown = {};
 client.on('messageCreate', async message => {
   if (message.author.bot) return;
-
   const content = message.content.replace(/\s/g,'');
   if (FORBIDDEN_WORDS.some(f => content.includes(f))) return;
 
@@ -123,7 +114,7 @@ client.on('messageCreate', async message => {
 });
 
 // ------------------- Bot Ready -------------------
-client.on('ready', () => {
+client.once('ready', () => {
   console.log(`Logged in as ${client.user.tag}`);
 });
 
@@ -131,7 +122,7 @@ client.on('ready', () => {
 client.on('interactionCreate', async interaction => {
   const userId = interaction.user.id;
 
-  // ===== デイリー報酬 =====
+  // デイリー報酬
   if(interaction.isButton() && interaction.customId==='daily'){
     if(interaction.channelId !== DAILY_CHANNEL_ID)
       return interaction.reply({ content: 'このチャンネルでは使えません', ephemeral: true });
@@ -145,13 +136,13 @@ client.on('interactionCreate', async interaction => {
     return interaction.reply({ content: `デイリー ${DAILY_AMOUNT_NUM}S 取得!`, ephemeral: true });
   }
 
-  // ===== 所持S確認 =====
+  // 所持S確認
   if(interaction.isButton() && interaction.customId==='check_balance'){
     const user = await getUser(userId);
     return interaction.reply({ content: `所持S: ${user.coins}S`, ephemeral: true });
   }
 
-  // ===== 管理者コイン操作 =====
+  // 管理者コイン操作
   if(interaction.isButton() && interaction.customId==='admin_adjust'){
     if(interaction.channelId !== ADMIN_CHANNEL_ID || !interaction.member.permissions.has('Administrator')) return;
 
@@ -180,7 +171,7 @@ client.on('interactionCreate', async interaction => {
     return interaction.reply({ content: `ユーザー ${targetId} の所持Sを ${newBalance}S に更新`, ephemeral: true });
   }
 
-  // ===== ルムマ作成 =====
+  // ルムマ作成
   if(ALLOWED_LUMMA_CHANNELS.includes(interaction.channelId)){
     if(interaction.isButton() && interaction.customId==='lumma_create'){
       const modal = new ModalBuilder()
@@ -225,6 +216,13 @@ client.on('interactionCreate', async interaction => {
     }
   }
 });
+
+// ------------------- HTTP サーバー（Web Service 用） -------------------
+const PORT = process.env.PORT || 10000;
+http.createServer((req,res)=>{
+  res.writeHead(200, {'Content-Type':'text/plain'});
+  res.end('Bot is running\n');
+}).listen(PORT, ()=>console.log(`HTTP server running on port ${PORT}`));
 
 // ------------------- Bot Login -------------------
 client.login(DISCORD_TOKEN);
