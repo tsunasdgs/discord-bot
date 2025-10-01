@@ -1,14 +1,23 @@
 {
-  "name": "discord-bot",
+  "name": "discord-uma-bot",
   "version": "1.0.0",
+  "description": "Discord bot with UMA, daily rewards, and Neon DB support",
+  "main": "main.js",
   "type": "module",
+  "scripts": {
+    "start": "node main.js",
+    "dev": "nodemon main.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
   "dependencies": {
-    "discord.js": "^14.11.0",
-    "dotenv": "^16.3.1",
-    "express": "^4.18.2",
-    "node-cron": "^3.0.2",
-    "node-schedule": "^2.1.1",
+    "discord.js": "^15.2.0",
     "pg": "^8.11.0",
-    "uuid": "^13.0.0"
+    "dotenv": "^16.3.1",
+    "node-schedule": "^2.1.1"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.2"
   }
 }
