@@ -1,10 +1,15 @@
-// rumma.js
 import { v4 as uuidv4 } from 'uuid';
-import { ActionRowBuilder, ButtonBuilder, ButtonStyle, ModalBuilder, TextInputBuilder, TextInputStyle, EmbedBuilder, SelectMenuBuilder, InteractionType } from 'discord.js';
+import { 
+  ActionRowBuilder, ButtonBuilder, ButtonStyle, ModalBuilder, 
+  TextInputBuilder, TextInputStyle, EmbedBuilder, 
+  SelectMenuBuilder, InteractionType 
+} from 'discord.js';
 
-const ALLOWED_CHANNELS = ['123456789012345678']; // ルムマ可能チャンネル
+// --- 環境変数からルムマ可能チャンネルを設定 ---
+const ALLOWED_CHANNELS = [process.env.RUMMA_CHANNEL_ID];
+
 let users = {}; // { userId: { balance: 1000 } }
-let races = {}; // { raceId: { name, hostId, status, horses: [{id,name}], bets: [] } }
+let races = {}; // { raceId: { name, hostId, status, horses, bets } }
 
 function getUser(userId) {
   if (!users[userId]) users[userId] = { balance: 1000 };
@@ -36,50 +41,68 @@ function distributeWinnings(race, winnerId) {
   });
 }
 
-// ---- 投票モーダルだけ変更 ----
+// ---- ルムマ用 Interaction handler ----
 export async function handleInteraction(interaction) {
   if (!ALLOWED_CHANNELS.includes(interaction.channelId)) return;
 
-  // ボタン処理
+  // --- ボタン処理 ---
   if (interaction.isButton()) {
     const [action, raceId, horseId] = interaction.customId.split('_');
     const race = races[raceId];
 
     if (action === 'bet') {
-      if (!race || race.status !== 'open') return interaction.reply({ content: '投票締切済みです。', ephemeral: true });
+      if (!race || race.status !== 'open') {
+        return interaction.reply({ content: '投票締切済みです。', ephemeral: true });
+      }
 
-      // 投票モーダルに変更
+      // 投票モーダル
       const modal = new ModalBuilder()
         .setCustomId(`bet_modal_${raceId}_${horseId}`)
         .setTitle(`単勝: ${race.horses.find(h => h.id === horseId)?.name}`)
         .addComponents(
           new ActionRowBuilder().addComponents(
-            new TextInputBuilder().setCustomId('amount').setLabel('投票金額(S)').setStyle(TextInputStyle.Short).setRequired(true)
+            new TextInputBuilder()
+              .setCustomId('amount')
+              .setLabel('投票金額(S)')
+              .setStyle(TextInputStyle.Short)
+              .setRequired(true)
           )
         );
       return interaction.showModal(modal);
     }
 
-    // start / close / declareは既存のまま
     if (action === 'start') {
-      if (!race || race.status !== 'open') return interaction.reply({ content: '投票はすでに開始済みです。', ephemeral: true });
+      if (!race || race.status !== 'open') {
+        return interaction.reply({ content: '投票はすでに開始済みです。', ephemeral: true });
+      }
       const embed = new EmbedBuilder()
         .setTitle(`ルムマ: ${race.name}`)
         .setDescription(race.horses.map(h=>`- ${h.name}`).join('\n'))
         .setColor('Green');
       const row = new ActionRowBuilder();
-      race.horses.forEach(h => row.addComponents(new ButtonBuilder().setCustomId(`bet_${raceId}_${h.id}`).setLabel(`単勝: ${h.name}`).setStyle(ButtonStyle.Primary)));
+      race.horses.forEach(h => 
+        row.addComponents(
+          new ButtonBuilder()
+            .setCustomId(`bet_${raceId}_${h.id}`)
+            .setLabel(`単勝: ${h.name}`)
+            .setStyle(ButtonStyle.Primary)
+        )
+      );
       return interaction.update({ embeds: [embed], components: [row] });
     }
 
     if (action === 'close') {
-      if (interaction.user.id !== race.hostId) return interaction.reply({ content: '部屋建てユーザーのみ締切可能です。', ephemeral: true });
+      if (interaction.user.id !== race.hostId) {
+        return interaction.reply({ content: '部屋建てユーザーのみ締切可能です。', ephemeral: true });
+      }
       race.status = 'closed';
       return interaction.reply({ content: '投票を締切ました。', ephemeral: false });
     }
 
     if (action === 'declare') {
-      if (interaction.user.id !== race.hostId) return interaction.reply({ content: '部屋建てユーザーのみ勝者入力可能です。', ephemeral: true });
+      if (interaction.user.id !== race.hostId) {
+        return interaction.reply({ content: '部屋建てユーザーのみ勝者入力可能です。', ephemeral: true });
+      }
       const select = new SelectMenuBuilder()
         .setCustomId(`winner_select_${raceId}`)
         .setPlaceholder('勝者を選択してください')
@@ -89,22 +112,29 @@ export async function handleInteraction(interaction) {
     }
   }
 
-  // モーダル送信（投票）
+  // --- モーダル送信（投票） ---
   if (interaction.type === InteractionType.ModalSubmit && interaction.customId.startsWith('bet_modal')) {
     const [_, raceId, horseId] = interaction.customId.split('_').slice(1);
     const race = races[raceId];
-    if (!race || race.status !== 'open') return interaction.reply({ content: '投票締切済みです。', ephemeral: true });
+    if (!race || race.status !== 'open') {
+      return interaction.reply({ content: '投票締切済みです。', ephemeral: true });
+    }
 
     const user = getUser(interaction.user.id);
     const amount = parseInt(interaction.fields.getTextInputValue('amount'));
-    if (isNaN(amount) || amount <= 0) return interaction.reply({ content: '正しい金額を入力してください', ephemeral: true });
-    if (user.balance < amount) return interaction.reply({ content: '残高不足です。', ephemeral: true });
+    if (isNaN(amount) || amount <= 0) {
+      return interaction.reply({ content: '正しい金額を入力してください', ephemeral: true });
+    }
+    if (user.balance < amount) {
+      return interaction.reply({ content: '残高不足です。', ephemeral: true });
+    }
 
     user.balance -= amount;
     race.bets.push({ userId: interaction.user.id, horseId, amount, payout: 0 });
 
     const odds = calculateOdds(race);
-    const embed = new EmbedBuilder().setTitle(`ルムマ: ${race.name} (投票中)`)
+    const embed = new EmbedBuilder()
+      .setTitle(`ルムマ: ${race.name} (投票中)`)
       .setDescription(race.horses.map(h => {
         const total = race.bets.filter(b => b.horseId === h.id).reduce((s,b)=>s+b.amount,0);
         const odd = odds[h.id].toFixed(2);
