@@ -12,6 +12,10 @@ import { Pool } from "pg";
 import dotenv from "dotenv";
 import schedule from "node-schedule";
 import crypto from "crypto";
+import http from "http";   // ← ここにまとめる！
+
+dotenv.config();
+const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 
 dotenv.config();
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
