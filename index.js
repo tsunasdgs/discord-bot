@@ -874,3 +874,4 @@ http.createServer((req, res) => {
   res.end("Bot is running!\n");
 }).listen(PORT, () => {
   console.log(`🌐 HTTP server running on port ${PORT}`);
+});
