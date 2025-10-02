@@ -743,7 +743,7 @@ client.once("ready", async () => {
 });
 
 client.login(process.env.DISCORD_TOKEN);
-// Render対策用のダミーHTTPサーバー
+// ================== HTTP サーバー（Render 用） ==================
 import http from "http";
 
 const PORT = process.env.PORT || 10000;
