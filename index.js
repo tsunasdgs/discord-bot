@@ -1,5 +1,5 @@
 // index.js （"type": "module" 前提）
-import { initUMA } from "./uma.js";
+
 import {
   Client, GatewayIntentBits, Partials,
   ActionRowBuilder, ButtonBuilder, ButtonStyle,
@@ -861,9 +861,8 @@ client.once("ready", async () => {
       if (ch) await sendUI(ch, "rumuma");
     }
   }
-// ✅ UMA機能の初期化（最後に呼び出す）
-  initUMA(client, pool, ephemeralReply, ephemeralUpdate, addCoins, fmt, createEmbed);
 });
+
 client.login(process.env.DISCORD_TOKEN);
 
 /* ==============================
@@ -875,4 +874,3 @@ http.createServer((req, res) => {
   res.end("Bot is running!\n");
 }).listen(PORT, () => {
   console.log(`🌐 HTTP server running on port ${PORT}`);
-});
