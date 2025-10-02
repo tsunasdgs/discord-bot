@@ -28,7 +28,7 @@ const client = new Client({
 });
 
 // ==============================
-// 環境設定
+// 環境
 // ==============================
 const DAILY_AMOUNT        = parseInt(process.env.DAILY_AMOUNT || "100", 10);
 const REWARD_ROLE_ID      = process.env.REWARD_ROLE_ID || "";
@@ -94,7 +94,6 @@ async function addCoins(userId, amount, type, note = null) {
     [userId, type, n, note]
   );
 }
-
 // ==============================
 // DB初期化
 // ==============================
@@ -172,9 +171,8 @@ async function ensureTables() {
     );
   `);
 }
-// ==============================
+
 // レース中止（返金）
-// ==============================
 async function refundRumuma(raceId, reason = "開催中止") {
   const raceRes = await pool.query(`SELECT race_name, horses FROM rumuma_races WHERE id=$1`, [raceId]);
   const betsRes = await pool.query(`SELECT amount, user_id FROM rumuma_bets WHERE race_id=$1`, [raceId]);
@@ -196,9 +194,7 @@ async function refundRumuma(raceId, reason = "開催中止") {
   await pool.query(`DELETE FROM rumuma_races WHERE id=$1`, [raceId]);
 }
 
-// ==============================
 // 履歴表示
-// ==============================
 function formatHistoryEmbed(row) {
   const when = formatJST(row.created_at);
   let typeLabel = "📦 その他";
@@ -230,9 +226,7 @@ async function replyHistoryEmbeds(interaction, rows) {
   if (chunk2.length) await interaction.followUp({ embeds: chunk2, ephemeral: true });
 }
 
-// ==============================
 // UI送信（管理／コイン／レース／カジノ）
-// ==============================
 async function sendUI(channel, type) {
   if (type === "admin") {
     const row = new ActionRowBuilder().addComponents(
@@ -285,10 +279,9 @@ async function sendUI(channel, type) {
     await channel.send({ content: "🎲 **カジノメニュー** 🎲", components: [row] });
   }
 }
-
-// ==============================
-// ガチャ
-// ==============================
+/* ==============================
+   ガチャ（SSRロール）
+============================== */
 async function playGacha(interaction) {
   const uid = interaction.user.id;
   const cost = 30;
@@ -328,10 +321,9 @@ async function playGacha(interaction) {
     embeds: [createEmbed("🎰 ガチャ結果", `結果: **${rarity}**\n🟢 +${fmt(reward)}S`, rarity === "SR" ? Colors.Purple : Colors.Grey)]
   });
 }
-
-// ==============================
-// カジノ：ジャグラー（改修版）
-// ==============================
+/* ==============================
+   カジノ：ジャグラー
+============================== */
 const JUGGLER_BET = 10;
 const JAG_TIME_SPINS = 20;
 const PROBS = {
@@ -401,9 +393,6 @@ function judge(board) {
   if (all("🍒"))  return { reward: 10,  type: "チェリー" };
   return { reward: 0, type: "ハズレ" };
 }
-// ==============================
-// カジノ：ジャグラー（改修版 本体）
-// ==============================
 async function playCasinoSlot(interaction) {
   const uid = interaction.user.id;
   const balRes = await pool.query(`SELECT balance FROM coins WHERE user_id=$1`, [uid]);
@@ -414,51 +403,37 @@ async function playCasinoSlot(interaction) {
       ephemeral: true
     });
   }
-
-  // JAG-TIME 状態
   const state = await getSlotState(uid);
   const mode = (state.mode === "JAG_TIME" && state.spins_left > 0) ? "JAG_TIME" : "NORMAL";
   const cfg = PROBS[mode];
 
-  // スピン・判定・会計
   const finalBoard = spinBoard(cfg);
   const { reward, type } = judge(finalBoard);
   const net = reward - JUGGLER_BET;
   await addCoins(uid, net, "casino_slot", `役:${type}`);
 
-  // 状態遷移
-  if (type === "BIG" || type === "REG") {
-    await setSlotState(uid, "JAG_TIME", JAG_TIME_SPINS);
-  } else if (mode === "JAG_TIME") {
-    await consumeJagSpin(uid);
-  }
+  if (type === "BIG" || type === "REG") await setSlotState(uid, "JAG_TIME", JAG_TIME_SPINS);
+  else if (mode === "JAG_TIME") await consumeJagSpin(uid);
 
-  // 最初の表示（1回だけ reply）
   let embed = new EmbedBuilder()
     .setTitle("🎰 ジャグラー START!!")
     .setDescription("```\n| ❓ | ❓ | ❓ |\n| ❓ | ❓ | ❓ |\n| ❓ | ❓ | ❓ |\n```")
     .setColor(Colors.Blurple);
-
   await interaction.reply({ embeds: [embed], ephemeral: true });
 
-  // 以降は同じメッセージを上書き（UIが流れない）
-  const delays = [350, 400, 500];
-  const masks = [
-    { left: true },
-    { left: true, center: true },
-    { left: true, center: true, right: true } // 最終
-  ];
+  await new Promise(r => setTimeout(r, 250));
+  embed = EmbedBuilder.from(embed).setTitle("🎰 回転中…").setDescription("```\n" + renderBoard(spinBoard(cfg)) + "\n```").setColor(Colors.Blue);
+  await interaction.editReply({ embeds: [embed] });
 
-  for (let i = 0; i < masks.length; i++) {
-    await new Promise(r => setTimeout(r, delays[i]));
-    const board = i === masks.length - 1 ? finalBoard : partialBoard(finalBoard, cfg, masks[i]);
-    embed = EmbedBuilder.from(embed)
-      .setTitle(i === masks.length - 1 ? "🎰 結果！" : "🎰 回転中…")
-      .setDescription("```\n" + renderBoard(board) + "\n```");
-    await interaction.editReply({ embeds: [embed] });
-  }
+  await new Promise(r => setTimeout(r, 300));
+  embed = EmbedBuilder.from(embed).setDescription("```\n" + renderBoard(partialBoard(finalBoard, cfg, { left:true, center:false, right:false })) + "\n```");
+  await interaction.editReply({ embeds: [embed] });
 
-  // 最終結果 Embed
+  await new Promise(r => setTimeout(r, 350));
+  embed = EmbedBuilder.from(embed).setDescription("```\n" + renderBoard(partialBoard(finalBoard, cfg, { left:true, center:true, right:false })) + "\n```");
+  await interaction.editReply({ embeds: [embed] });
+
+  await new Promise(r => setTimeout(r, 500));
   const resultEmbed = new EmbedBuilder()
     .setDescription("```\n" + renderBoard(finalBoard) + "\n```")
     .addFields(
@@ -466,7 +441,6 @@ async function playCasinoSlot(interaction) {
       { name: "払い戻し", value: `${fmt(reward)}S`, inline: true },
       { name: "純計算", value: `${net >= 0 ? "+" : ""}${fmt(net)}S`, inline: true }
     );
-
   if (type === "BIG") {
     resultEmbed.setTitle("🎉🎰 BIG BONUS!! 🎉").setColor(Colors.Gold).setFooter({ text: "✨ GOGO! ランプ全点灯 ✨" });
   } else if (type === "REG") {
@@ -476,14 +450,14 @@ async function playCasinoSlot(interaction) {
   } else {
     resultEmbed.setTitle("❌ ハズレ…").setColor(Colors.Grey);
   }
-
-  await new Promise(r => setTimeout(r, 600));
   await interaction.editReply({ embeds: [resultEmbed] });
-}
 
-// ==============================
-// Interaction（ボタン／セレクト／モーダル）
-// ==============================
+  // ★ ここを追加：結果メッセージを15秒後に自動削除（ephemeral専用UIが埋もれない）
+  setTimeout(() => interaction.deleteReply().catch(() => {}), 15000);
+}
+/* ==============================
+   Interaction（ボタン／セレクト／モーダル）
+============================== */
 client.on("interactionCreate", async (interaction) => {
   try {
     /* ---------- ボタン ---------- */
@@ -741,7 +715,7 @@ client.on("interactionCreate", async (interaction) => {
         });
       }
 
-      // 購入：ウマ選択 → 金額入力モーダル
+      // 購入：ウマ選択 → 金額入力（残高＋現オッズ）
       if (interaction.customId.startsWith("select_bet_horse_")) {
         const raceId = parseInt(interaction.customId.split("_")[3], 10);
         const horse = interaction.values[0];
@@ -1073,10 +1047,9 @@ client.on("interactionCreate", async (interaction) => {
     }
   }
 });
-
-// ==============================
-// 発言報酬（スパム抑止）
-// ==============================
+/* ==============================
+   発言報酬（スパム抑止）
+============================== */
 const NG_WORDS = new Set(["ああ", "いい", "あ", "い", "う", "え", "お", "草", "w", "ｗ"]);
 const hashMessage = (t) => crypto.createHash("sha1").update(t).digest("hex");
 
@@ -1084,7 +1057,6 @@ client.on(Events.MessageCreate, async (msg) => {
   try {
     if (msg.author.bot || !msg.guild) return;
 
-    // ロール制限
     if (REWARD_ROLE_ID) {
       const member = await msg.guild.members.fetch(msg.author.id).catch(() => null);
       if (!member || !member.roles.cache.has(REWARD_ROLE_ID)) return;
@@ -1135,17 +1107,17 @@ client.on(Events.MessageCreate, async (msg) => {
   }
 });
 
-// ==============================
-// デイリー受取リセット（JST 05:00）
-// ==============================
+/* ==============================
+   デイリー受取リセット（JST 05:00）
+============================== */
 schedule.scheduleJob("0 20 * * *", async () => { // UTC20:00 = JST05:00
   await pool.query("DELETE FROM daily_claims");
   console.log("✅ デイリー受取リセット完了 (JST05:00)");
 });
 
-// ==============================
-// READY
-// ==============================
+/* ==============================
+   READY
+============================== */
 client.once("ready", async () => {
   console.log(`✅ Logged in as ${client.user.tag}`);
   await ensureTables();
@@ -1172,9 +1144,9 @@ client.once("ready", async () => {
 
 client.login(process.env.DISCORD_TOKEN);
 
-// ==============================
-// HTTP サーバ（Render）
-// ==============================
+/* ==============================
+   HTTP サーバ（Render）
+============================== */
 const PORT = process.env.PORT || 10000;
 http.createServer((req, res) => {
   res.writeHead(200, { "Content-Type": "text/plain" });
