@@ -869,7 +869,6 @@ client.login(process.env.DISCORD_TOKEN);
    HTTP サーバ（Render Web Service 用）
 ============================== */
 const PORT = process.env.PORT || 10000;
-import http from "http";
 http.createServer((req, res) => {
   res.writeHead(200, { "Content-Type": "text/plain" });
   res.end("Bot is running!\n");
