@@ -743,3 +743,13 @@ client.once("ready", async () => {
 });
 
 client.login(process.env.DISCORD_TOKEN);
+// Render対策用のダミーHTTPサーバー
+import http from "http";
+
+const PORT = process.env.PORT || 10000;
+http.createServer((req, res) => {
+  res.writeHead(200, { "Content-Type": "text/plain" });
+  res.end("Bot is running!\n");
+}).listen(PORT, () => {
+  console.log(`🌐 HTTP server running on port ${PORT}`);
+});
