@@ -322,7 +322,7 @@ async function playGacha(interaction) {
   });
 }
 /* ==============================
-   カジノ：ジャグラー
+   カジノ：ジャグラー（祝福モード対応）
 ============================== */
 const JUGGLER_BET = 10;
 const JAG_TIME_SPINS = 20;
@@ -330,6 +330,7 @@ const PROBS = {
   NORMAL:  { big: 1/180, reg: 1/90,  grape: 1/6,  cherry: 1/12 },
   JAG_TIME:{ big: 1/90,  reg: 1/60, grape: 1/5, cherry: 1/10 }
 };
+
 async function getSlotState(uid) {
   const rs = await pool.query(`SELECT mode, spins_left FROM slot_states WHERE user_id=$1`, [uid]);
   if (!rs.rowCount) return { mode: "NORMAL", spins_left: 0 };
@@ -387,12 +388,13 @@ function partialBoard(finalBoard, cfg, mask = { left:false, center:false, right:
 function judge(board) {
   const line = [board[0][1], board[1][1], board[2][1]];
   const all = (s) => line.every(v => v === s);
-  if (all("7️⃣"))  return { reward: 120, type: "BIG" };
-  if (all("🎰"))  return { reward: 40,  type: "REG" };
+  if (all("7️⃣"))  return { reward: 300, type: "BIG" };
+  if (all("🎰"))  return { reward: 100, type: "REG" };
   if (all("🍇"))  return { reward: 15,  type: "ぶどう" };
   if (all("🍒"))  return { reward: 10,  type: "チェリー" };
   return { reward: 0, type: "ハズレ" };
 }
+
 async function playCasinoSlot(interaction) {
   const uid = interaction.user.id;
   const balRes = await pool.query(`SELECT balance FROM coins WHERE user_id=$1`, [uid]);
@@ -403,6 +405,7 @@ async function playCasinoSlot(interaction) {
       ephemeral: true
     });
   }
+
   const state = await getSlotState(uid);
   const mode = (state.mode === "JAG_TIME" && state.spins_left > 0) ? "JAG_TIME" : "NORMAL";
   const cfg = PROBS[mode];
@@ -415,46 +418,73 @@ async function playCasinoSlot(interaction) {
   if (type === "BIG" || type === "REG") await setSlotState(uid, "JAG_TIME", JAG_TIME_SPINS);
   else if (mode === "JAG_TIME") await consumeJagSpin(uid);
 
+  // ===== リール回転演出 =====
   let embed = new EmbedBuilder()
     .setTitle("🎰 ジャグラー START!!")
     .setDescription("```\n| ❓ | ❓ | ❓ |\n| ❓ | ❓ | ❓ |\n| ❓ | ❓ | ❓ |\n```")
     .setColor(Colors.Blurple);
   await interaction.reply({ embeds: [embed], ephemeral: true });
 
-  await new Promise(r => setTimeout(r, 250));
+  await new Promise(r => setTimeout(r, 500));
   embed = EmbedBuilder.from(embed).setTitle("🎰 回転中…").setDescription("```\n" + renderBoard(spinBoard(cfg)) + "\n```").setColor(Colors.Blue);
   await interaction.editReply({ embeds: [embed] });
 
-  await new Promise(r => setTimeout(r, 300));
-  embed = EmbedBuilder.from(embed).setDescription("```\n" + renderBoard(partialBoard(finalBoard, cfg, { left:true, center:false, right:false })) + "\n```");
+  await new Promise(r => setTimeout(r, 800));
+  embed = EmbedBuilder.from(embed).setDescription("```\n" + renderBoard(partialBoard(finalBoard, cfg, { left:true })) + "\n```");
   await interaction.editReply({ embeds: [embed] });
 
-  await new Promise(r => setTimeout(r, 350));
-  embed = EmbedBuilder.from(embed).setDescription("```\n" + renderBoard(partialBoard(finalBoard, cfg, { left:true, center:true, right:false })) + "\n```");
+  await new Promise(r => setTimeout(r, 1200));
+  embed = EmbedBuilder.from(embed).setDescription("```\n" + renderBoard(partialBoard(finalBoard, cfg, { left:true, center:true })) + "\n```");
   await interaction.editReply({ embeds: [embed] });
 
-  await new Promise(r => setTimeout(r, 500));
-  const resultEmbed = new EmbedBuilder()
-    .setDescription("```\n" + renderBoard(finalBoard) + "\n```")
-    .addFields(
-      { name: "役", value: type, inline: true },
-      { name: "払い戻し", value: `${fmt(reward)}S`, inline: true },
-      { name: "純計算", value: `${net >= 0 ? "+" : ""}${fmt(net)}S`, inline: true }
-    );
+  // ===== 結果演出 =====
   if (type === "BIG") {
-    resultEmbed.setTitle("🎉🎰 BIG BONUS!! 🎉").setColor(Colors.Gold).setFooter({ text: "✨ GOGO! ランプ全点灯 ✨" });
-  } else if (type === "REG") {
-    resultEmbed.setTitle("🔴 REG BONUS!").setColor(Colors.Red).setFooter({ text: "ピカッ！REGランプ点灯" });
-  } else if (type === "チェリー" || type === "ぶどう") {
-    resultEmbed.setTitle(`🍒 ${type} 揃い!! 🍇`).setColor(Colors.Green);
-  } else {
-    resultEmbed.setTitle("❌ ハズレ…").setColor(Colors.Grey);
-  }
-  await interaction.editReply({ embeds: [resultEmbed] });
+    // 祝福モード演出（1分かけて増加）
+    const totalSteps = 20;
+    const stepReward = Math.floor(reward / totalSteps);
+    let accumulated = 0;
+    const bgmList = ["♪ ドンドンドン！", "♪ テケテケテン！", "♪ チャラララ～ン！", "♪ ジャジャジャーン！", "♪ ファンファーレ！！"];
 
-  // ★ ここを追加：結果メッセージを15秒後に自動削除（ephemeral専用UIが埋もれない）
-  setTimeout(() => interaction.deleteReply().catch(() => {}), 15000);
+    for (let i = 0; i < totalSteps; i++) {
+      accumulated += stepReward;
+      const bar = "💰".repeat(i + 1) + "▫️".repeat(totalSteps - i - 1);
+      const bgm = bgmList[Math.floor(Math.random() * bgmList.length)];
+
+      await interaction.editReply({
+        embeds: [
+          new EmbedBuilder()
+            .setTitle("🎆 BIG BONUS 🎆")
+            .setDescription(`🌈 祝福モード突入 🌈\n\`\`\`\n${renderBoard(finalBoard)}\n\`\`\`\n💰 ${fmt(accumulated)}\n${bar}\n${bgm}`)
+            .setColor(i % 2 === 0 ? Colors.Gold : Colors.Yellow)
+        ]
+      });
+      await new Promise(r => setTimeout(r, 3000));
+    }
+
+    await interaction.editReply({
+      embeds: [
+        new EmbedBuilder()
+          .setTitle("🌈 JAG TIME 突入!! 🌈")
+          .setDescription("🎆🎉🎆 GOGO! ランプ全点灯 🎆🎉🎆\n🔥 メダルがあふれ出す！ 🔥")
+          .setColor(Colors.Gold)
+      ]
+    });
+
+  } else if (type === "REG") {
+    await interaction.editReply({
+      embeds: [new EmbedBuilder().setTitle("🔴 REG BONUS!").setDescription(`\`\`\`\n${renderBoard(finalBoard)}\n\`\`\`\n♪ ピポピポーン…`).setColor(Colors.Red)]
+    });
+  } else if (type === "チェリー" || type === "ぶどう") {
+    await interaction.editReply({
+      embeds: [new EmbedBuilder().setTitle(`🍒 ${type} 揃い!! 🍇`).setDescription(`\`\`\`\n${renderBoard(finalBoard)}\n\`\`\`\n♪ キラキラリン～✨`).setColor(Colors.Green)]
+    });
+  } else {
+    await interaction.editReply({
+      embeds: [new EmbedBuilder().setTitle("❌ ハズレ…").setDescription(`\`\`\`\n${renderBoard(finalBoard)}\n\`\`\`\n♪ シーン…`).setColor(Colors.Grey)]
+    });
+  }
 }
+/
 /* ==============================
    Interaction（ボタン／セレクト／モーダル）
 ============================== */
