@@ -484,7 +484,6 @@ async function playCasinoSlot(interaction) {
     });
   }
 }
-/
 /* ==============================
    Interaction（ボタン／セレクト／モーダル）
 ============================== */
