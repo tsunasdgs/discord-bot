@@ -94,6 +94,7 @@ async function addCoins(userId, amount, type, note = null) {
     [userId, type, n, note]
   );
 }
+
 // ==============================
 // DB初期化
 // ==============================
@@ -279,6 +280,7 @@ async function sendUI(channel, type) {
     await channel.send({ content: "🎲 **カジノメニュー** 🎲", components: [row] });
   }
 }
+
 /* ==============================
    ガチャ（SSRロール）
 ============================== */
@@ -321,9 +323,81 @@ async function playGacha(interaction) {
     embeds: [createEmbed("🎰 ガチャ結果", `結果: **${rarity}**\n🟢 +${fmt(reward)}S`, rarity === "SR" ? Colors.Purple : Colors.Grey)]
   });
 }
+
 /* ==============================
    カジノ：ジャグラー（祝福モード対応）
 ============================== */
+const JUGGLER_BET = 10;
+const JAG_TIME_SPINS = 20;
+const PROBS = {
+  NORMAL:  { big: 1/180, reg: 1/90,  grape: 1/6,  cherry: 1/12 },
+  JAG_TIME:{ big: 1/90,  reg: 1/60, grape: 1/5, cherry: 1/10 }
+};
+
+async function getSlotState(uid) {
+  const rs = await pool.query(`SELECT mode, spins_left FROM slot_states WHERE user_id=$1`, [uid]);
+  if (!rs.rowCount) return { mode: "NORMAL", spins_left: 0 };
+  return rs.rows[0];
+}
+async function setSlotState(uid, mode, spins) {
+  await pool.query(
+    `INSERT INTO slot_states(user_id, mode, spins_left, updated_at)
+     VALUES ($1,$2,$3,now())
+     ON CONFLICT (user_id) DO UPDATE SET mode=$2, spins_left=$3, updated_at=now()`,
+    [uid, mode, spins]
+  );
+}
+async function consumeJagSpin(uid) {
+  await pool.query(
+    `UPDATE slot_states
+     SET spins_left = GREATEST(spins_left - 1, 0),
+         mode = CASE WHEN spins_left - 1 <= 0 THEN 'NORMAL' ELSE mode END,
+         updated_at = now()
+     WHERE user_id=$1`,
+    [uid]
+  );
+}
+function draw(cfg) {
+  const r = Math.random();
+  if (r < cfg.big) return "7️⃣";
+  if (r < cfg.big + cfg.reg) return "🎰";
+  if (r < cfg.big + cfg.reg + cfg.cherry) return "🍒";
+  if (r < cfg.big + cfg.reg + cfg.cherry + cfg.grape) return "🍇";
+  return ["🍋", "⭐"][Math.floor(Math.random()*2)];
+}
+function spinBoard(cfg) {
+  return [
+    [draw(cfg), draw(cfg), draw(cfg)],
+    [draw(cfg), draw(cfg), draw(cfg)],
+    [draw(cfg), draw(cfg), draw(cfg)]
+  ];
+}
+function renderBoard(board) {
+  return (
+    `| ${board[0][0]} | ${board[1][0]} | ${board[2][0]} |\n` +
+    `| ${board[0][1]} | ${board[1][1]} | ${board[2][1]} |\n` +
+    `| ${board[0][2]} | ${board[1][2]} | ${board[2][2]} |`
+  );
+}
+function partialBoard(finalBoard, cfg, mask = { left:false, center:false, right:false }) {
+  const rand = () => [draw(cfg), draw(cfg), draw(cfg)];
+  const col = (i) => [finalBoard[i][0], finalBoard[i][1], finalBoard[i][2]];
+  return [
+    mask.left   ? col(0) : rand(),
+    mask.center ? col(1) : rand(),
+    mask.right  ? col(2) : rand()
+  ];
+}
+function judge(board) {
+  const line = [board[0][1], board[1][1], board[2][1]];
+  const all = (s) => line.every(v => v === s);
+  if (all("7️⃣"))  return { reward: 300, type: "BIG" };
+  if (all("🎰"))  return { reward: 100, type: "REG" };
+  if (all("🍇"))  return { reward: 15,  type: "ぶどう" };
+  if (all("🍒"))  return { reward: 10,  type: "チェリー" };
+  return { reward: 0, type: "ハズレ" };
+}
+
 async function playCasinoSlot(interaction) {
   const uid = interaction.user.id;
   const balRes = await pool.query(`SELECT balance FROM coins WHERE user_id=$1`, [uid]);
@@ -1032,11 +1106,16 @@ client.on("interactionCreate", async (interaction) => {
     }
   } catch (err) {
     console.error("interaction error:", err);
-    if (interaction.isRepliable?.()) {
-      await ephemeralReply(interaction, { content: "処理中にエラーが発生しました" }).catch(() => {});
-    }
+    try {
+      if (!interaction.replied && !interaction.deferred) {
+        await interaction.reply({ content: "処理中にエラーが発生しました", ephemeral: true });
+      } else {
+        await interaction.followUp({ content: "処理中にエラーが発生しました", ephemeral: true });
+      }
+    } catch {}
   }
 });
+
 /* ==============================
    発言報酬（スパム抑止）
 ============================== */
