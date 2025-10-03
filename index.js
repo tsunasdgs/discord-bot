@@ -489,6 +489,9 @@ async function playCasinoSlot(interaction) {
       ]
     });
 
+    // 🎯 BIGは演出が長いので、90秒後に削除
+    setTimeout(() => interaction.deleteReply().catch(() => {}), 90000);
+
   } else if (type === "REG") {
     await interaction.editReply({
       embeds: [
@@ -498,6 +501,9 @@ async function playCasinoSlot(interaction) {
           .setColor(Colors.Red)
       ]
     });
+    // 20秒後に削除
+    setTimeout(() => interaction.deleteReply().catch(() => {}), 20000);
+
   } else if (type === "チェリー" || type === "ぶどう") {
     await interaction.editReply({
       embeds: [
@@ -507,6 +513,9 @@ async function playCasinoSlot(interaction) {
           .setColor(Colors.Green)
       ]
     });
+    // 20秒後に削除
+    setTimeout(() => interaction.deleteReply().catch(() => {}), 20000);
+
   } else {
     await interaction.editReply({
       embeds: [
@@ -516,8 +525,11 @@ async function playCasinoSlot(interaction) {
           .setColor(Colors.Grey)
       ]
     });
+    // 15秒後に削除
+    setTimeout(() => interaction.deleteReply().catch(() => {}), 15000);
   }
 }
+
 
 /* ==============================
    Interaction（ボタン／セレクト／モーダル）
