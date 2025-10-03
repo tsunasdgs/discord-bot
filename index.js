@@ -399,6 +399,7 @@ async function playCasinoSlot(interaction) {
   const uid = interaction.user.id;
   const balRes = await pool.query(`SELECT balance FROM coins WHERE user_id=$1`, [uid]);
   const balance = balRes.rowCount ? Number(balRes.rows[0].balance) : 0;
+
   if (balance < JUGGLER_BET) {
     return interaction.reply({
       embeds: [createEmbed("🎰 ジャグラー", `残高不足：必要 ${fmt(JUGGLER_BET)}S / 保有 ${fmt(balance)}S`, Colors.Red)],
@@ -417,6 +418,77 @@ async function playCasinoSlot(interaction) {
 
   if (type === "BIG" || type === "REG") await setSlotState(uid, "JAG_TIME", JAG_TIME_SPINS);
   else if (mode === "JAG_TIME") await consumeJagSpin(uid);
+
+  // 🎯 変更点：まず deferReply で枠を確保
+  await interaction.deferReply({ ephemeral: true });
+
+  // ===== リール回転演出 =====
+  let embed = new EmbedBuilder()
+    .setTitle("🎰 ジャグラー START!!")
+    .setDescription("```\n| ❓ | ❓ | ❓ |\n| ❓ | ❓ | ❓ |\n| ❓ | ❓ | ❓ |\n```")
+    .setColor(Colors.Blurple);
+  await interaction.editReply({ embeds: [embed] });
+
+  await new Promise(r => setTimeout(r, 500));
+  embed = EmbedBuilder.from(embed).setTitle("🎰 回転中…").setDescription("```\n" + renderBoard(spinBoard(cfg)) + "\n```").setColor(Colors.Blue);
+  await interaction.editReply({ embeds: [embed] });
+
+  await new Promise(r => setTimeout(r, 800));
+  embed = EmbedBuilder.from(embed).setDescription("```\n" + renderBoard(partialBoard(finalBoard, cfg, { left:true })) + "\n```");
+  await interaction.editReply({ embeds: [embed] });
+
+  await new Promise(r => setTimeout(r, 1200));
+  embed = EmbedBuilder.from(embed).setDescription("```\n" + renderBoard(partialBoard(finalBoard, cfg, { left:true, center:true })) + "\n```");
+  await interaction.editReply({ embeds: [embed] });
+
+  // ===== 結果演出 =====
+  if (type === "BIG") {
+    // 祝福モード演出（1分かけて増加）
+    const totalSteps = 20;
+    const stepReward = Math.floor(reward / totalSteps);
+    let accumulated = 0;
+    const bgmList = ["♪ ドンドンドン！", "♪ テケテケテン！", "♪ チャラララ～ン！", "♪ ジャジャジャーン！", "♪ ファンファーレ！！"];
+
+    for (let i = 0; i < totalSteps; i++) {
+      accumulated += stepReward;
+      const bar = "💰".repeat(i + 1) + "▫️".repeat(totalSteps - i - 1);
+      const bgm = bgmList[Math.floor(Math.random() * bgmList.length)];
+
+      await interaction.editReply({
+        embeds: [
+          new EmbedBuilder()
+            .setTitle("🎆 BIG BONUS 🎆")
+            .setDescription(`🌈 祝福モード突入 🌈\n\`\`\`\n${renderBoard(finalBoard)}\n\`\`\`\n💰 ${fmt(accumulated)}\n${bar}\n${bgm}`)
+            .setColor(i % 2 === 0 ? Colors.Gold : Colors.Yellow)
+        ]
+      });
+      await new Promise(r => setTimeout(r, 3000));
+    }
+
+    await interaction.editReply({
+      embeds: [
+        new EmbedBuilder()
+          .setTitle("🌈 JAG TIME 突入!! 🌈")
+          .setDescription("🎆🎉🎆 GOGO! ランプ全点灯 🎆🎉🎆\n🔥 メダルがあふれ出す！ 🔥")
+          .setColor(Colors.Gold)
+      ]
+    });
+
+  } else if (type === "REG") {
+    await interaction.editReply({
+      embeds: [new EmbedBuilder().setTitle("🔴 REG BONUS!").setDescription(`\`\`\`\n${renderBoard(finalBoard)}\n\`\`\`\n♪ ピポピポーン…`).setColor(Colors.Red)]
+    });
+  } else if (type === "チェリー" || type === "ぶどう") {
+    await interaction.editReply({
+      embeds: [new EmbedBuilder().setTitle(`🍒 ${type} 揃い!! 🍇`).setDescription(`\`\`\`\n${renderBoard(finalBoard)}\n\`\`\`\n♪ キラキラリン～✨`).setColor(Colors.Green)]
+    });
+  } else {
+    await interaction.editReply({
+      embeds: [new EmbedBuilder().setTitle("❌ ハズレ…").setDescription(`\`\`\`\n${renderBoard(finalBoard)}\n\`\`\`\n♪ シーン…`).setColor(Colors.Grey)]
+    });
+  }
+}
+
 
   // ===== リール回転演出 =====
   let embed = new EmbedBuilder()
