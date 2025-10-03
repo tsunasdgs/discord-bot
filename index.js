@@ -555,7 +555,6 @@ async function playCasinoSlot(interaction) {
       embeds: [new EmbedBuilder().setTitle("❌ ハズレ…").setDescription(`\`\`\`\n${renderBoard(finalBoard)}\n\`\`\`\n♪ シーン…`).setColor(Colors.Grey)]
     });
   }
-}
 /* ==============================
    Interaction（ボタン／セレクト／モーダル）
 ============================== */
