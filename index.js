@@ -526,7 +526,7 @@ async function playCasinoSlot(interaction) {
       ]
     });
     // 15秒後に削除
-    setTimeout(() => interaction.deleteReply().catch(() => {}), 15000);
+    setTimeout(() => interaction.deleteReply().catch(() => {}), 3000);
   }
 }
 
