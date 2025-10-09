@@ -163,6 +163,8 @@ async function ensureTables() {
       created_at TIMESTAMP DEFAULT now()
     );
   `);
+
+  // 🎰 slot_states: JAG-TIME 管理
   await pool.query(`
     CREATE TABLE IF NOT EXISTS slot_states (
       user_id TEXT PRIMARY KEY,
@@ -365,23 +367,19 @@ function probsFromDenoms(denoms, mode) {
     // JAG-TIMEは当たりやすく（分母を小さく）
     return {
       big: 1 / (d.big * 0.5),     // ×2倍当たりやすい
-      reg: 1 / (d.reg * 0.7),     // 約1.43倍
+      reg: 1 / (d.reg * 0.7),     // ≒1.43倍
       grape: 1 / (d.grape * 0.9), // 少し優遇
       cherry: 1 / (d.cherry * 0.8)
     };
   }
   return { big: 1 / d.big, reg: 1 / d.reg, grape: 1 / d.grape, cherry: 1 / d.cherry };
 }
-
 // ==============================
 // カジノ：ジャグラー（改修版）
 // ==============================
 const JUGGLER_BET = 10;
 const JAG_TIME_SPINS = 20;
-const PROBS = {
-  NORMAL:  { big: 1/180, reg: 1/90,  grape: 1/6,  cherry: 1/12 },
-  JAG_TIME:{ big: 1/90,  reg: 1/60, grape: 1/5, cherry: 1/10 }
-};
+
 async function getSlotState(uid) {
   const rs = await pool.query(`SELECT mode, spins_left FROM slot_states WHERE user_id=$1`, [uid]);
   if (!rs.rowCount) return { mode: "NORMAL", spins_left: 0 };
@@ -445,11 +443,14 @@ function judge(board) {
   if (all("🍒"))  return { reward: 10,  type: "チェリー" };
   return { reward: 0, type: "ハズレ" };
 }
+
 // ==============================
 // カジノ：ジャグラー（改修版 本体）
 // ==============================
 async function playCasinoSlot(interaction) {
   const uid = interaction.user.id;
+
+  // 残高チェック
   const balRes = await pool.query(`SELECT balance FROM coins WHERE user_id=$1`, [uid]);
   const balance = balRes.rowCount ? Number(balRes.rows[0].balance) : 0;
   if (balance < JUGGLER_BET) {
@@ -461,34 +462,45 @@ async function playCasinoSlot(interaction) {
 
   // JAG-TIME 状態
   const state = await getSlotState(uid);
-  const mode = (state.mode === "JAG_TIME" && state.spins_left > 0) ? "JAG_TIME" : "NORMAL";
+  const inJag = (state.mode === "JAG_TIME" && state.spins_left > 0);
+  const mode = inJag ? "JAG_TIME" : "NORMAL";
 
-  // 🔧 設定（DB）から動的確率を取得（倍率＝分母を小さくすると当たりやすく）
+  // 🔧 設定（DB）から動的確率を取得
   const denoms = await loadSlotConfig();
   const cfg = probsFromDenoms(denoms, mode);
 
-  // スピン・判定・会計
+  // スピン・判定・会計（履歴に「役:◯◯」）
   const finalBoard = spinBoard(cfg);
   const { reward, type } = judge(finalBoard);
   const net = reward - JUGGLER_BET;
   await addCoins(uid, net, "casino_slot", `役:${type}`);
 
   // 状態遷移
+  let jagAfterSpins = state.spins_left;
+  let jagEntered = false;
   if (type === "BIG" || type === "REG") {
     await setSlotState(uid, "JAG_TIME", JAG_TIME_SPINS);
+    jagAfterSpins = JAG_TIME_SPINS;
+    jagEntered = true;
   } else if (mode === "JAG_TIME") {
     await consumeJagSpin(uid);
+    jagAfterSpins = Math.max((state.spins_left || 0) - 1, 0);
   }
 
   // 最初の表示（1回だけ reply）
+  // JAG-TIME中は残り回数をヘッダ表示
+  let startTitle = inJag
+    ? `💫 JAG-TIME中！（残り ${jagAfterSpins} 回）`
+    : "🎰 ジャグラー START!!";
+
   let embed = new EmbedBuilder()
-    .setTitle("🎰 ジャグラー START!!")
+    .setTitle(startTitle)
     .setDescription("```\n| ❓ | ❓ | ❓ |\n| ❓ | ❓ | ❓ |\n| ❓ | ❓ | ❓ |\n```")
-    .setColor(Colors.Blurple);
+    .setColor(inJag ? Colors.Aqua : Colors.Blurple);
 
   await interaction.reply({ embeds: [embed], ephemeral: true });
 
-  // 以降は同じメッセージを上書き（UIが流れない）
+  // 3段階スピン演出（上書き型）: 350ms→400ms→500ms
   const delays = [350, 400, 500];
   const masks = [
     { left: true },
@@ -499,37 +511,86 @@ async function playCasinoSlot(interaction) {
   for (let i = 0; i < masks.length; i++) {
     await new Promise(r => setTimeout(r, delays[i]));
     const board = i === masks.length - 1 ? finalBoard : partialBoard(finalBoard, cfg, masks[i]);
+    const isFinal = (i === masks.length - 1);
+
     embed = EmbedBuilder.from(embed)
-      .setTitle(i === masks.length - 1 ? "🎰 結果！" : "🎰 回転中…")
-      .setDescription("```\n" + renderBoard(board) + "\n```");
+      .setTitle(isFinal ? "🎰 結果！" : "🎰 回転中…")
+      .setDescription("```\n" + renderBoard(board) + "\n```")
+      .setColor(isFinal ? Colors.Blurple : embed.data.color ?? Colors.Blurple);
+
     await interaction.editReply({ embeds: [embed] });
   }
 
-  // 最終結果 Embed（回転後に残高表示）
+  // 会計後の残高
   const balAfterRes = await pool.query(`SELECT balance FROM coins WHERE user_id=$1`, [uid]);
   const balAfter = balAfterRes.rowCount ? Number(balAfterRes.rows[0].balance) : 0;
 
+  // 役ごとに色・テキスト強化
   const resultEmbed = new EmbedBuilder()
     .setDescription("```\n" + renderBoard(finalBoard) + "\n```")
     .addFields(
       { name: "役", value: type, inline: true },
       { name: "払い戻し", value: `${fmt(reward)}S`, inline: true },
       { name: "純計算", value: `${net >= 0 ? "+" : ""}${fmt(net)}S`, inline: true },
-      { name: "現在残高", value: `${fmt(balAfter)}S`, inline: false } // 追加：残高表示
+      { name: "現在残高", value: `${fmt(balAfter)}S`, inline: false }
     );
 
-  if (type === "BIG") {
-    resultEmbed.setTitle("🎉🎰 BIG BONUS!! 🎉").setColor(Colors.Gold).setFooter({ text: "✨ GOGO! ランプ全点灯 ✨" });
-  } else if (type === "REG") {
-    resultEmbed.setTitle("🔴 REG BONUS!").setColor(Colors.Red).setFooter({ text: "ピカッ！REGランプ点灯" });
-  } else if (type === "チェリー" || type === "ぶどう") {
-    resultEmbed.setTitle(`🍒 ${type} 揃い!! 🍇`).setColor(Colors.Green);
+  // 現在モード・残スピン表示（仕様: JAG-TIME情報表示）
+  if (jagEntered) {
+    resultEmbed.addFields({ name: "モード", value: `JAG-TIME（残り ${JAG_TIME_SPINS} 回）`, inline: false });
+  } else if (inJag) {
+    resultEmbed.addFields({ name: "モード", value: `JAG-TIME（残り ${jagAfterSpins} 回）`, inline: false });
   } else {
-    resultEmbed.setTitle("❌ ハズレ…").setColor(Colors.Grey);
+    resultEmbed.addFields({ name: "モード", value: `NORMAL`, inline: false });
   }
 
+  if (type === "BIG") {
+    resultEmbed
+      .setTitle("🎉🎰 BIG BONUS!! 🎉")
+      .setColor(Colors.Gold)
+      .setFooter({ text: "✨ GOGO! ランプ全点灯 ✨" });
+  } else if (type === "REG") {
+    resultEmbed
+      .setTitle("🔴 REG BONUS!")
+      .setColor(Colors.Red)
+      .setFooter({ text: "ピカッ！REGランプ点灯" });
+  } else if (type === "チェリー" || type === "ぶどう") {
+    resultEmbed
+      .setTitle(`🍒 ${type} 揃い!! 🍇`)
+      .setColor(Colors.Green)
+      .setFooter({ text: "♪ チャラリン！" });
+  } else {
+    resultEmbed
+      .setTitle("❌ ハズレ…")
+      .setColor(Colors.Grey)
+      .setFooter({ text: "…シーン" });
+  }
+
+  // 少し待って演出切替
   await new Promise(r => setTimeout(r, 600));
   await interaction.editReply({ embeds: [resultEmbed] });
+
+  // GOGOランプ 点滅風エフェクト（BIG時のみ軽く2回）
+  if (type === "BIG") {
+    const blinkTexts = ["✨ GOGO! ランプ全点灯 ✨", "　"];
+    for (let i = 0; i < 2; i++) {
+      await new Promise(r => setTimeout(r, 240));
+      await interaction.editReply({
+        embeds: [EmbedBuilder.from(resultEmbed).setFooter({ text: blinkTexts[i % 2] })]
+      });
+    }
+    // 最終は点灯で落ち着く
+    await interaction.editReply({
+      embeds: [EmbedBuilder.from(resultEmbed).setFooter({ text: "✨ GOGO! ランプ全点灯 ✨" })]
+    });
+  }
+
+  // JAG-TIME突入時の告知（仕様：水色＋残スピン数表示）
+  if (jagEntered) {
+    const jagEmbed = createEmbed("💫 JAG-TIME突入！", `BIG/REGボーナスにより突入！\n残りスピン：**${JAG_TIME_SPINS} 回**`, Colors.Aqua);
+    // 既存の結果メッセージを保持しつつ、短時間だけ告知を重ねる
+    await interaction.followUp({ embeds: [jagEmbed], ephemeral: true }).catch(() => {});
+  }
 }
 
 // ==============================
@@ -846,7 +907,7 @@ client.on("interactionCreate", async (interaction) => {
 
         const modal = new ModalBuilder()
           .setCustomId(`rumuma_bet_amount_modal_${raceId}__${encodeURIComponent(horse)}`)
-          .setTitle(`ウマ券購入: ${horse}（倍率 ${odds}）`) // 倍率のみ
+          .setTitle(`ウマ券購入: ${horse}（倍率 ${odds}）`)
           .addComponents(
             new ActionRowBuilder().addComponents(
               new TextInputBuilder()
@@ -977,7 +1038,7 @@ client.on("interactionCreate", async (interaction) => {
         return ephemeralUpdate(interaction, { embeds: [createEmbed("👀 賭け状況", lines, Colors.Aqua)], components: [] });
       }
 
-      // オッズ確認：レース選択後 → 倍率のみを即表示（モーダル廃止）
+      // オッズ確認：レース選択後 → 倍率のみを即表示
       if (interaction.customId === "select_odds_race") {
         const raceId = parseInt(interaction.values[0], 10);
         const r = await pool.query(`SELECT race_name, horses FROM rumuma_races WHERE id=$1 AND finished=false`, [raceId]);
@@ -1089,17 +1150,6 @@ client.on("interactionCreate", async (interaction) => {
           );
         }
 
-        // 🔧 DM通知は不要（廃止）
-        /*
-        const hostId = raceRes.rows[0]?.host_id;
-        if (hostId) {
-          const hostUser = await client.users.fetch(hostId).catch(() => null);
-          if (hostUser) {
-            hostUser.send(\`📢 [\${raceRes.rows[0]?.race_name}] Race:\${raceId}\n\${interaction.user.tag} が **\${horse}** に **\${fmt(total)}S** を賭けました\`).catch(() => {});
-          }
-        }
-        */
-
         return ephemeralReply(interaction, {
           content: `購入完了：Race:${raceId} ${horse} に [${amounts.map(fmt).join(", ")}]S\n現在の残高：${fmt(balance - total)}S\n倍率(購入直前): ${oddsSnap}`
         });
@@ -1146,7 +1196,6 @@ client.on("interactionCreate", async (interaction) => {
     }
   }
 });
-
 // ==============================
 // 発言報酬（スパム抑止）
 // ==============================
@@ -1215,30 +1264,32 @@ schedule.scheduleJob("0 20 * * *", async () => { // UTC20:00 = JST05:00
   await pool.query("DELETE FROM daily_claims");
   console.log("✅ デイリー受取リセット完了 (JST05:00)");
 });
+
 // ==============================
 // READY
 // ==============================
+async function trySendUIById(id, type) {
+  const ch = await client.channels.fetch(id).catch(() => null);
+  if (ch) await sendUI(ch, type);
+}
+
 client.once("ready", async () => {
   console.log(`✅ Logged in as ${client.user.tag}`);
   await ensureTables();
 
   if (process.env.ADMIN_CHANNEL_ID) {
-    const ch = await client.channels.fetch(process.env.ADMIN_CHANNEL_ID).catch(() => null);
-    if (ch) await sendUI(ch, "admin");
+    await trySendUIById(process.env.ADMIN_CHANNEL_ID, "admin");
   }
   if (process.env.DAILY_CHANNEL_ID) {
-    const ch = await client.channels.fetch(process.env.DAILY_CHANNEL_ID).catch(() => null);
-    if (ch) await sendUI(ch, "daily");
+    await trySendUIById(process.env.DAILY_CHANNEL_ID, "daily");
   }
   if (process.env.RUMUMA_CHANNELS) {
     for (const cid of process.env.RUMUMA_CHANNELS.split(",").map(s => s.trim()).filter(Boolean)) {
-      const ch = await client.channels.fetch(cid).catch(() => null);
-      if (ch) await sendUI(ch, "rumuma");
+      await trySendUIById(cid, "rumuma");
     }
   }
   if (CASINO_CHANNEL_ID) {
-    const ch = await client.channels.fetch(CASINO_CHANNEL_ID).catch(() => null);
-    if (ch) await sendUI(ch, "casino");
+    await trySendUIById(CASINO_CHANNEL_ID, "casino");
   }
 });
 
@@ -1254,5 +1305,4 @@ http.createServer((req, res) => {
 }).listen(PORT, () => {
   console.log(`🌐 HTTP server running on port ${PORT}`);
 });
-//
 // ✅ 完全出力完了
