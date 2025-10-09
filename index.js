@@ -392,27 +392,28 @@ async function broadcastSSRWin({ guild, winnerUser, reward, roleName, roleColor 
 }
 
 // ==============================
-// カジノ演出（単一メッセージ上書き）
+// カジノ演出（単一メッセージ上書き — ephemeralはeditReplyで更新）
 // ==============================
 async function runShowyEffect(interaction, title, lines){
-  // 3段階の煽り演出（メッセージ上書き・ephemeral）
   const frames = [
     `🕹️ **${title}**\n${lines}\n\n▶️ スタート…`,
     `🕹️ **${title}**\n${lines}\n\n🎞️ ぐるぐる…`,
     `🕹️ **${title}**\n${lines}\n\n🔔 ドキドキ…`,
   ];
-  const msg = await interaction.reply({ embeds:[createEmbed(title, frames[0], Colors.Blurple)], ephemeral:true, fetchReply:true });
+  // 最初は reply（ephemeral）
+  await interaction.reply({ embeds:[createEmbed(title, frames[0], Colors.Blurple)], ephemeral:true });
+  // 以降は **必ず** editReply で上書き（ephemeralはMessage#edit不可）
   for (let i=1;i<frames.length;i++){
     await new Promise(r=>setTimeout(r, 500));
-    await msg.edit({ embeds:[createEmbed(title, frames[i], Colors.Blurple)] }).catch(()=>{});
+    await interaction.editReply({ embeds:[createEmbed(title, frames[i], Colors.Blurple)] }).catch(()=>{});
   }
-  return msg;
+  // 後続編集のため interaction を返す
+  return interaction;
 }
 
 // ダブルアップ誘導UI
 async function offerDoubleUp(messageOrInteraction, userId, gameLabel, wonAmount, step=0){
   if (wonAmount <= 0 || step >= DOUBLEUP_MAX_STEPS) {
-    // 終了（UI消し）
     if ("editReply" in messageOrInteraction) {
       await messageOrInteraction.editReply({ components: [] }).catch(()=>{});
     } else if ("edit" in messageOrInteraction) {
@@ -475,10 +476,11 @@ async function playGacha(interaction) {
   }
 
   // 演出付き（上書き）
-  const msg = await runShowyEffect(interaction, "🎲 ガチャ", `抽選中…\n必要：${fmt(GACHA_COST)}S / 当選で即時付与`);
+  await runShowyEffect(interaction, "🎲 ガチャ", `抽選中…\n必要：${fmt(GACHA_COST)}S / 当選で即時付与`);
   await new Promise(r=>setTimeout(r, 600));
-  await msg.edit({
-    embeds: [createEmbed("🎲 ガチャ結果", `結果: **${rarity}**\n🟢 +${fmt(reward)}S`, color)]
+  await interaction.editReply({
+    embeds: [createEmbed("🎲 ガチャ結果", `結果: **${rarity}**\n🟢 +${fmt(reward)}S`, color)],
+    components: []
   }).catch(()=>{});
   return;
 }
@@ -883,12 +885,12 @@ client.on("interactionCreate", async (interaction) => {
         }
 
         const first = randInt(1, 13);
-        const suspense = await runShowyEffect(interaction, "🎯 High & Low", `ベット：**${fmt(bet)}S**（上限 ${fmt(CASINO_BET_MAX)}S）`);
+        await runShowyEffect(interaction, "🎯 High & Low", `ベット：**${fmt(bet)}S**（上限 ${fmt(CASINO_BET_MAX)}S）`);
         const row = new ActionRowBuilder().addComponents(
           new ButtonBuilder().setCustomId(`casino_highlow_guess:H:${bet}:${first}:x`).setLabel("🔺 高い").setStyle(ButtonStyle.Primary),
           new ButtonBuilder().setCustomId(`casino_highlow_guess:L:${bet}:${first}:x`).setLabel("🔻 低い").setStyle(ButtonStyle.Danger)
         );
-        await suspense.edit({
+        await interaction.editReply({
           embeds: [createEmbed("🎯 High & Low", `🃏 最初のカード: **${first}**\n「高い」か「低い」か選んでください。\n（同値は不正解扱い）`)],
           components: [row]
         }).catch(()=>{});
@@ -906,14 +908,14 @@ client.on("interactionCreate", async (interaction) => {
           return ephemeralReply(interaction, { embeds: [createEmbed("Coin Toss", `残高不足：必要 ${fmt(bet)}S / 保有 ${fmt(balance)}S`, Colors.Red)] }, 20000);
         }
 
-        const suspense = await runShowyEffect(interaction, "🪙 Coin Toss", `ベット：**${fmt(bet)}S** / コイントス中…`);
+        await runShowyEffect(interaction, "🪙 Coin Toss", `ベット：**${fmt(bet)}S** / コイントス中…`);
         const win = Math.random() < 0.5;
         const delta = win ? bet : -bet;
 
         await addCoins(uid, delta, "casino_cointoss", win ? "WIN (50%)" : "LOSE (50%)");
         const final = await getBalance(uid);
 
-        const msg = await suspense.edit({
+        await interaction.editReply({
           embeds: [
             createEmbed(
               "🪙 Coin Toss 結果",
@@ -924,9 +926,9 @@ client.on("interactionCreate", async (interaction) => {
           components: []
         }).catch(()=>{});
 
-        if (win && msg) {
+        if (win) {
           // ダブルアップを提案（勝ち分を賭ける）
-          await offerDoubleUp(suspense, uid, "CT", delta, 0);
+          await offerDoubleUp(interaction, uid, "CT", delta, 0);
         }
         return;
       }
@@ -942,7 +944,7 @@ client.on("interactionCreate", async (interaction) => {
           return ephemeralReply(interaction, { embeds: [createEmbed("Dice Duel", `残高不足：必要 ${fmt(bet)}S / 保有 ${fmt(balance)}S`, Colors.Red)] }, 20000);
         }
 
-        const suspense = await runShowyEffect(interaction, "🎲 Dice Duel", `ベット：**${fmt(bet)}S** / ダイス振り中…`);
+        await runShowyEffect(interaction, "🎲 Dice Duel", `ベット：**${fmt(bet)}S** / ダイス振り中…`);
         const p1 = randInt(1, 6), p2 = randInt(1, 6);
         const b1 = randInt(1, 6), b2 = randInt(1, 6);
         const ps = p1 + p2;
@@ -964,7 +966,7 @@ client.on("interactionCreate", async (interaction) => {
         await addCoins(uid, delta, "casino_dice", `P:${p1},${p2} B:${b1},${b2}`);
         const final = await getBalance(uid);
 
-        const msg = await suspense.edit({
+        await interaction.editReply({
           embeds: [
             createEmbed(
               "🎲 Dice Duel 結果",
@@ -975,8 +977,8 @@ client.on("interactionCreate", async (interaction) => {
           components: []
         }).catch(()=>{});
 
-        if (delta > 0 && msg) {
-          await offerDoubleUp(suspense, uid, "DD", delta, 0);
+        if (delta > 0) {
+          await offerDoubleUp(interaction, uid, "DD", delta, 0);
         }
         return;
       }
@@ -1018,11 +1020,11 @@ client.on("interactionCreate", async (interaction) => {
             // さらに同額上乗せ
             await addCoins(uid, winAmount, "casino_doubleup", `STEP ${step+1} WIN (${(DOUBLEUP_WIN_RATE*100).toFixed(1)}%) ${gameLabel}`);
             const newStake = winAmount * 2;
-            const msg = await interaction.update({
+            await interaction.update({
               embeds:[createEmbed("♠️ Double Up", `✅ 成功！ **+${fmt(winAmount)}S** 上乗せ\n現在の勝ち分：**${fmt(newStake)}S**\n続けますか？（最大${DOUBLEUP_MAX_STEPS}回）`, Colors.Gold)],
               components:[]
             });
-            await offerDoubleUp(msg, uid, gameLabel, newStake, step+1);
+            await offerDoubleUp(interaction, uid, gameLabel, newStake, step+1);
           } else {
             // 失敗：元の勝ち分を没収（勝ち分をマイナス計上）
             await addCoins(uid, -winAmount, "casino_doubleup", `STEP ${step+1} LOSE (${(DOUBLEUP_WIN_RATE*100).toFixed(1)}%) ${gameLabel}`);
