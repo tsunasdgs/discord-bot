@@ -17,7 +17,24 @@ import crypto from "crypto";
 import http from "http";
 
 dotenv.config();
-const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+
+// ==============================
+// ロガー（環境に応じて閾値）
+// ==============================
+const LOG_LEVEL = (process.env.LOG_LEVEL || "INFO").toUpperCase();
+const log = {
+  info: (...a) => (LOG_LEVEL === "INFO" || LOG_LEVEL === "DEBUG") && console.log("[INFO]", ...a),
+  error: (...a) => console.error("[ERROR]", ...a),
+  debug: (...a) => (LOG_LEVEL === "DEBUG") && console.log("[DEBUG]", ...a),
+};
+
+// ==============================
+// DB
+// ==============================
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: process.env.DATABASE_URL?.includes("sslmode=require") ? undefined : { rejectUnauthorized: false }
+});
 
 // ==============================
 // クライアント
@@ -36,18 +53,23 @@ const REWARD_PER_MESSAGE  = parseInt(process.env.REWARD_PER_MESSAGE || "10", 10)
 const REWARD_DAILY_LIMIT  = parseInt(process.env.REWARD_DAILY_LIMIT || "10", 10);
 const REWARD_COOLDOWN_SEC = parseInt(process.env.REWARD_COOLDOWN_SEC || "45", 10);
 
-// ★ カジノUI自動配置先（明示ID優先／envで上書き可）
+// ★ UI自動送信先
 const STATIC_CASINO_CHANNEL_ID = "1424340886585868368";
 const CASINO_CHANNEL_ID = process.env.CASINO_CHANNEL_ID || STATIC_CASINO_CHANNEL_ID;
+const DAILY_CHANNEL_ID  = process.env.DAILY_CHANNEL_ID || ""; // ←「コインUIのch」として利用
 
-// ★ ガチャ経済（調整ブロック）
+// ★ ガチャ設定
 const GACHA_COST = parseInt(process.env.GACHA_COST || "40", 10);
-// 累積確率で判定（p は累積）
 const GACHA_TABLE = [
   { p: 0.74, rarity: "S",   reward: 6,   color: Colors.Grey  },
   { p: 0.98, rarity: "SR",  reward: 15,  color: Colors.Purple},
-  { p: 1.00, rarity: "SSR", reward: 300, color: Colors.Gold  }, // ★ 多めに排出
+  { p: 1.00, rarity: "SSR", reward: 300, color: Colors.Gold  },
 ];
+
+// ★ カジノ上限/ダブルアップ
+const CASINO_MAX_BET        = parseInt(process.env.CASINO_MAX_BET || "1000", 10);   // 絶対上限
+const CASINO_MAX_BET_RATE   = Math.max(0.05, Math.min(1.0, parseFloat(process.env.CASINO_MAX_BET_RATE || "0.25"))); // 残高比
+const CASINO_DOUBLEUP_MAX   = parseInt(process.env.CASINO_DOUBLEUP_MAX_ROUNDS || "3", 10);
 
 // ==============================
 // ユーティリティ
@@ -91,7 +113,6 @@ async function ephemeralUpdate(interaction, payload, ms = 15000) {
   return msg;
 }
 
-// コイン加算（差額記録＋履歴）
 async function addCoins(userId, amount, type, note = null) {
   const n = Math.trunc(Number(amount) || 0);
   await pool.query(
@@ -113,7 +134,12 @@ async function getBalance(userId) {
 }
 const randInt = (min, max) => Math.floor(Math.random() * (max - min + 1)) + min;
 
-// [REMOVED:CASINO_CLEANUP] purgeCasinoMessages は廃止
+// ベット上限（残高×率 と 絶対上限 の小さい方）
+function effBetLimit(balance) {
+  const byRate = Math.floor(balance * CASINO_MAX_BET_RATE);
+  const lim = Math.max(1, Math.min(CASINO_MAX_BET, byRate || 0));
+  return lim;
+}
 
 // ==============================
 // DB初期化
@@ -183,8 +209,6 @@ async function ensureTables() {
       created_at TIMESTAMP DEFAULT now()
     );
   `);
-
-  // [REMOVED:SLOT_TABLES] 旧スロット用テーブルは作成しない
 }
 
 // ==============================
@@ -194,12 +218,10 @@ async function refundRumuma(raceId, reason = "開催中止") {
   const raceRes = await pool.query(`SELECT race_name, horses FROM rumuma_races WHERE id=$1`, [raceId]);
   const betsRes = await pool.query(`SELECT amount, user_id FROM rumuma_bets WHERE race_id=$1`, [raceId]);
 
-  let totalPot = 0;
-  for (const b of betsRes.rows) totalPot += Number(b.amount);
-
   for (const b of betsRes.rows) {
     await addCoins(b.user_id, b.amount, "rumuma_refund", `Race:${raceId} ${reason}`);
   }
+  const totalPot = betsRes.rows.reduce((s, b) => s + Number(b.amount), 0);
 
   await pool.query(
     `INSERT INTO rumuma_results(race_id, race_name, horses, winner, total_pot, status, finished_at)
@@ -220,7 +242,6 @@ function formatHistoryEmbed(row) {
   let color = Colors.Blurple;
 
   switch (row.type) {
-    // [NOTE] 旧slot履歴は互換表示のみ
     case "casino_slot": typeLabel = "🎰（削除済）ジャグラー"; color = Colors.Grey; break;
     case "daily":       typeLabel = "🎁 デイリー";   color = Colors.Green;  break;
     case "msg_reward":  typeLabel = "💬 メッセ報酬"; color = Colors.Blue;   break;
@@ -248,6 +269,7 @@ async function replyHistoryEmbeds(interaction, rows) {
   else return interaction.reply({ content: "履歴はありません", ephemeral: true });
   if (chunk2.length) await interaction.followUp({ embeds: chunk2, ephemeral: true });
 }
+
 // ==============================
 // UI送信（管理／コイン／レース／カジノ）
 // ==============================
@@ -293,9 +315,7 @@ async function sendUI(channel, type) {
     await channel.send({ content: "レースメニュー", components: [row1, row2, row3] });
   }
 
-  // ==============================
-  // 🎰 Casino Mini Games (追加)
-  // ==============================
+  // 🎰 Casino Mini Games
   if (type === "casino") {
     const row = new ActionRowBuilder().addComponents(
       new ButtonBuilder().setCustomId("casino_highlow").setLabel("🎯 High & Low").setStyle(ButtonStyle.Primary),
@@ -306,7 +326,7 @@ async function sendUI(channel, type) {
       embeds: [
         createEmbed(
           "🎰 TeamSDG’s Casino 🎰",
-          "遊びたいゲームを選んでね！\n[🎯 High & Low] [🪙 Coin Toss] [🎲 Dice Duel]"
+          "✨ **豪華演出搭載**：一攫千金のチャンス！\n[🎯 High & Low] [🪙 Coin Toss] [🎲 Dice Duel]"
         )
       ],
       components: [row]
@@ -315,39 +335,45 @@ async function sendUI(channel, type) {
 }
 
 // ==============================
-// （追加）SSR演出ブロードキャスト
+// SSR演出ブロードキャスト（要件1）
+//  - コインUIのch（DAILY_CHANNEL_ID）とカジノch（CASINO_CHANNEL_ID）の両方に祝福メッセージ
 // ==============================
+async function sendToChannelId(channelId, payload) {
+  if (!channelId) return;
+  try {
+    const ch = await client.channels.fetch(channelId).catch(() => null);
+    if (ch) await ch.send(payload);
+  } catch (e) {
+    log.error("sendToChannelId failed", e);
+  }
+}
 async function broadcastSSRWin({ guild, winnerUser, reward, roleName, roleColor }) {
   try {
-    const channelId = CASINO_CHANNEL_ID;
-    if (!channelId) return;
-    const ch = await (guild ? guild.channels.fetch(channelId).catch(() => null) : client.channels.fetch(channelId).catch(() => null));
-    if (!ch) return;
-
     const head = "🎆🎆🎆 **SSR 大 当 た り ！** 🎆🎆🎆";
     const body = [
       `🎉 <@${winnerUser.id}> さんが **SSR** を引き当てました！`,
       `💰 祝賀ボーナス：**+${fmt(reward)}S**`,
       roleName ? `🏷️ ロール作成：**${roleName}**（色:${roleColor || "#FFD700"}）` : null,
       "",
-      "▶️ みんなも挑戦：ガチャは「コインメニュー」から！",
-      "▶️ 稼ぐなら：カジノやメッセ報酬、デイリーも活用しよう！"
+      "▶️ ガチャは「コインメニュー」から！",
+      "▶️ 稼ぐなら：**カジノ**／**メッセ報酬**／**デイリー**も活用！"
     ].filter(Boolean).join("\n");
+    const embed = createEmbed(head, body, Colors.Gold);
 
-    await ch.send({
-      embeds: [createEmbed(head, body, Colors.Gold)]
-    });
+    // コインUIのch（優先）＆カジノch に送信
+    await sendToChannelId(DAILY_CHANNEL_ID, { embeds: [embed] });
+    await sendToChannelId(CASINO_CHANNEL_ID, { embeds: [embed] });
 
-    // 簡易多段演出（花火→紙吹雪）
-    setTimeout(() => ch.send("🎇🎇🎇 **FIREWORKS** 🎇🎇🎇"), 700);
-    setTimeout(() => ch.send("🎊🎊🎊 **CONGRATS!** 🎊🎊🎊"), 1400);
+    // 演出（紙吹雪・花火）
+    setTimeout(() => sendToChannelId(DAILY_CHANNEL_ID, { content: "🎊🎊🎊 **CONGRATS!** 🎊🎊🎊" }), 800);
+    setTimeout(() => sendToChannelId(CASINO_CHANNEL_ID, { content: "🎇🎇🎇 **FIREWORKS** 🎇🎇🎇" }), 1600);
   } catch (e) {
-    console.error("broadcastSSRWin error:", e);
+    log.error("broadcastSSRWin error:", e);
   }
 }
 
 // ==============================
-// ガチャ
+// ガチャ（要件1：SSR時モーダル＋祝福演出）
 // ==============================
 async function playGacha(interaction) {
   const uid = interaction.user.id;
@@ -357,18 +383,30 @@ async function playGacha(interaction) {
     return ephemeralReply(interaction, { embeds: [createEmbed("ガチャ", `残高不足：必要 ${fmt(GACHA_COST)}S / 保有 ${fmt(balance)}S`, Colors.Red)] });
   }
 
+  // アニメ風演出 → 課金 → 抽選
+  await interaction.reply({
+    embeds: [createEmbed("🎲 ガチャ", "🔮 **召喚中…**\n`★` `★★` `★★★` …")],
+    ephemeral: true
+  });
+
+  await new Promise(r => setTimeout(r, 700));
   await addCoins(uid, -GACHA_COST, "gacha", `ガチャ支払い:${GACHA_COST}S`);
 
-  // 抽選
   const r = Math.random();
   const pick = GACHA_TABLE.find(t => r < t.p) || GACHA_TABLE[GACHA_TABLE.length - 1];
   const { rarity, reward, color } = pick;
 
+  // 演出更新
+  await interaction.editReply({
+    embeds: [createEmbed("🎲 ガチャ", "✨ **光が収束していく…**\n`★★★` `★★★★` `★★★★★`")]
+  });
+  await new Promise(r2 => setTimeout(r2, 650));
+
   await addCoins(uid, reward, "gacha_reward", `ガチャ当選:${rarity}`);
 
-  // 表示
   if (rarity === "SSR") {
-    // SSR：ロール作成モーダル＋先行で派手演出（コイン多め）
+    // 祝福演出（両チャンネル）→ ロール作成モーダル
+    broadcastSSRWin({ guild: interaction.guild, winnerUser: interaction.user, reward, roleName: null, roleColor: null }).catch(() => {});
     const modal = new ModalBuilder()
       .setCustomId("gacha_ssr_modal")
       .setTitle("SSRロール作成")
@@ -380,16 +418,14 @@ async function playGacha(interaction) {
           new TextInputBuilder().setCustomId("role_color").setLabel("カラーコード（例：#FFD700）").setStyle(TextInputStyle.Short).setRequired(false)
         )
       );
-
-    // 先に当選演出を送る（モーダルは続けて表示）
-    broadcastSSRWin({ guild: interaction.guild, winnerUser: interaction.user, reward, roleName: null, roleColor: null }).catch(() => {});
     return interaction.showModal(modal);
   }
 
-  return ephemeralReply(interaction, {
+  return interaction.editReply({
     embeds: [createEmbed("🎲 ガチャ結果", `結果: **${rarity}**\n🟢 +${fmt(reward)}S`, color)]
   });
 }
+
 // ==============================
 // Interaction（ボタン／セレクト／モーダル）
 // ==============================
@@ -424,13 +460,11 @@ client.on("interactionCreate", async (interaction) => {
           return;
         }
 
-        // 旧slot UIは無効応答
-        case "slot_config_open": {
+        // 旧slotの名残を防衛
+        case "slot_config_open":
           return ephemeralReply(interaction, { content: "🎰 ジャグラー機能は削除されました（設定UIは無効です）。" }, 20000);
-        }
-        case "casino_cleanup": {
+        case "casino_cleanup":
           return ephemeralReply(interaction, { content: "🎰 ジャグラー関連の掃除機能は削除されました。古いメッセージは手動で削除してください。" }, 20000);
-        }
 
         /* ===== コイン系 ===== */
         case "daily_claim": {
@@ -474,23 +508,17 @@ client.on("interactionCreate", async (interaction) => {
           return ephemeralReply(interaction, { embeds: [createEmbed("🏅 コインランキング（TOP10）", lines, Colors.Gold)] }, 30000);
         }
 
-        // 旧slot起動は封鎖
-        case "casino_slot": {
+        case "casino_slot":
           return ephemeralReply(interaction, { content: "🎰 ジャグラー機能は削除されました。メニューからは非表示です。" }, 20000);
-        }
 
-        /* ====== 🎰 Casino Mini Games: 起点（モーダル表示） ====== */
+        /* ====== 🎰 Casino 起点（各ゲームのベットモーダル） ====== */
         case "casino_highlow": {
           const modal = new ModalBuilder()
             .setCustomId("casino_bet_modal_highlow")
             .setTitle("High & Low / ベット額")
             .addComponents(
               new ActionRowBuilder().addComponents(
-                new TextInputBuilder()
-                  .setCustomId("bet")
-                  .setLabel("ベット額（未入力なら既定: 10S）")
-                  .setStyle(TextInputStyle.Short)
-                  .setRequired(false)
+                new TextInputBuilder().setCustomId("bet").setLabel("ベット額（未入力=10S）").setStyle(TextInputStyle.Short).setRequired(false)
               )
             );
           return interaction.showModal(modal);
@@ -501,11 +529,7 @@ client.on("interactionCreate", async (interaction) => {
             .setTitle("Coin Toss / ベット額")
             .addComponents(
               new ActionRowBuilder().addComponents(
-                new TextInputBuilder()
-                  .setCustomId("bet")
-                  .setLabel("ベット額（未入力なら既定: 10S）")
-                  .setStyle(TextInputStyle.Short)
-                  .setRequired(false)
+                new TextInputBuilder().setCustomId("bet").setLabel("ベット額（未入力=10S）").setStyle(TextInputStyle.Short).setRequired(false)
               )
             );
           return interaction.showModal(modal);
@@ -516,30 +540,30 @@ client.on("interactionCreate", async (interaction) => {
             .setTitle("Dice Duel / ベット額")
             .addComponents(
               new ActionRowBuilder().addComponents(
-                new TextInputBuilder()
-                  .setCustomId("bet")
-                  .setLabel("ベット額（未入力なら既定: 10S）")
-                  .setStyle(TextInputStyle.Short)
-                  .setRequired(false)
+                new TextInputBuilder().setCustomId("bet").setLabel("ベット額（未入力=10S）").setStyle(TextInputStyle.Short).setRequired(false)
               )
             );
           return interaction.showModal(modal);
         }
       }
 
-      /* ====== 🎯 High&Low 2手目（高い/低い） ====== */
+      /* ===== 高低当て 2手目（高い/低い を選ぶ） ===== */
       if (interaction.customId.startsWith("casino_highlow_guess:")) {
         const [, guess, betStr, firstStr] = interaction.customId.split(":");
-        const bet = Math.max(1, parseInt(betStr, 10) || 10);
+        let bet = Math.max(1, parseInt(betStr, 10) || 10);
         const first = parseInt(firstStr, 10);
         const uid = interaction.user.id;
 
-        const next = randInt(1, 13);
+        const balance = await getBalance(uid);
+        const limit = effBetLimit(balance);
+        if (bet > limit) bet = limit; // 上限適用
 
+        const next = randInt(1, 13);
         let delta = -bet;
         let resultText = `🃏 最初: ${first}\n🂠 次のカード: ${next}\n`;
         const isHigh = next > first;
         const isLow  = next < first;
+
         if ((guess === "H" && isHigh) || (guess === "L" && isLow)) {
           delta = Math.floor(bet * 1.8);
           resultText += `✅ 正解！ **+${fmt(delta)}S**\n`;
@@ -550,20 +574,99 @@ client.on("interactionCreate", async (interaction) => {
         await addCoins(uid, delta, "casino_highlow", `first:${first} next:${next} guess:${guess}`);
         const finalBal = await getBalance(uid);
 
+        // 勝利時はダブルアップ提案
+        const components = [];
+        if (delta > 0) {
+          const row = new ActionRowBuilder().addComponents(
+            new ButtonBuilder().setCustomId(`casino_doubleup:${delta}:1`).setLabel("🃏 ダブルアップ！").setStyle(ButtonStyle.Success),
+            new ButtonBuilder().setCustomId("casino_takewin").setLabel("💼 勝ちを確定").setStyle(ButtonStyle.Secondary)
+          );
+          components.push(row);
+        }
+
+        // 演出：点滅 → 結果
+        await interaction.update({
+          embeds: [createEmbed("🎯 High & Low", "💫 **判定中…**", Colors.Fuchsia)],
+          components: []
+        });
+        setTimeout(() => {
+          interaction.editReply({
+            embeds: [
+              createEmbed(
+                "🎯 High & Low 結果",
+                `${resultText}\n残高：**${fmt(finalBal)}S**${bet > limit ? `\n（ベットは上限 ${fmt(limit)}S に調整されました）` : ""}`,
+                delta >= 0 ? Colors.Fuchsia : Colors.Red
+              )
+            ],
+            components
+          }).catch(() => {});
+        }, 600);
+        return;
+      }
+
+      // ダブルアップ確定（共通）
+      if (interaction.customId.startsWith("casino_doubleup:")) {
+        const [, amountStr, roundStr] = interaction.customId.split(":");
+        const amount = Math.max(1, parseInt(amountStr, 10) || 0);
+        const round  = Math.max(1, parseInt(roundStr, 10) || 1);
+        const uid = interaction.user.id;
+
+        const balance = await getBalance(uid);
+        // ダブルアップは「現在の勝ち分」を賭けるイメージ：勝てば同額プラス、負ければ同額マイナス
+        if (round > CASINO_DOUBLEUP_MAX) {
+          return interaction.update({
+            embeds: [createEmbed("🃏 ダブルアップ", `これ以上は挑戦できません（最大 ${CASINO_DOUBLEUP_MAX} 連続）。\n現在の勝ち **${fmt(amount)}S** を確定しました。`, Colors.Grey)],
+            components: []
+          });
+        }
+
+        // 次のステークが上限を超える場合はそこで止める
+        const limit = effBetLimit(balance);
+        if (amount > limit) {
+          return interaction.update({
+            embeds: [createEmbed("🃏 ダブルアップ", `上限により挑戦できません（上限:${fmt(limit)}S / 今:${fmt(amount)}S）。\n現在の勝ち **${fmt(amount)}S** を確定しました。`, Colors.Grey)],
+            components: []
+          });
+        }
+
+        // 50/50
+        const win = Math.random() < 0.5;
+        const delta = win ? amount : -amount;
+        await addCoins(uid, delta, "casino_cointoss", win ? `DOUBLE-UP WIN (R${round})` : `DOUBLE-UP LOSE (R${round})`);
+        const final = await getBalance(uid);
+
+        // 連勝ならさらに挑戦
+        if (win && round < CASINO_DOUBLEUP_MAX) {
+          const nextAmount = amount * 2;
+          const row = new ActionRowBuilder().addComponents(
+            new ButtonBuilder().setCustomId(`casino_doubleup:${nextAmount}:${round+1}`).setLabel(`🔥 さらに倍 (${fmt(nextAmount)}S)`).setStyle(ButtonStyle.Success),
+            new ButtonBuilder().setCustomId("casino_takewin").setLabel("💼 勝ちを確定").setStyle(ButtonStyle.Secondary)
+          );
+          return interaction.update({
+            embeds: [createEmbed("🃏 ダブルアップ", `✅ 成功！ **+${fmt(amount)}S**（合計勝ち：**${fmt(amount)}S** → **${fmt(nextAmount)}S**）\n残高：**${fmt(final)}S**`, Colors.Gold)],
+            components: [row]
+          });
+        }
+
+        // 失敗 or 上限到達で終了
         return interaction.update({
-          embeds: [
-            createEmbed(
-              "🎯 High & Low 結果",
-              `${resultText}\n残高：**${fmt(finalBal)}S**`,
-              delta >= 0 ? Colors.Fuchsia : Colors.Red
-            )
-          ],
-          components: [] // UIは消す
+          embeds: [createEmbed("🃏 ダブルアップ", win
+            ? `🏁 完了：勝ちを確定しました（最終：**+${fmt(amount)}S**）。\n残高：**${fmt(final)}S**`
+            : `💥 失敗… **-${fmt(amount)}S**\n残高：**${fmt(final)}S**`, win ? Colors.Gold : Colors.Red)],
+          components: []
+        });
+      }
+
+      // 勝ちを確定（ボタン）
+      if (interaction.customId === "casino_takewin") {
+        return interaction.update({
+          embeds: [createEmbed("🧾 精算", "勝ちを確定しました。おめでとう！")],
+          components: []
         });
       }
     }
 
-    /* ---------- セレクトメニュー（既存ルムマ一式） ---------- */
+    /* ---------- セレクトメニュー（ルムマ関連・既存保持） ---------- */
     if (interaction.isStringSelectMenu()) {
       if (interaction.customId === "select_bet_race") {
         const raceId = parseInt(interaction.values[0], 10);
@@ -599,6 +702,7 @@ client.on("interactionCreate", async (interaction) => {
         const odds = horseSum > 0 ? (totalPot / horseSum).toFixed(2) : "賭けなし";
 
         const balance = await getBalance(interaction.user.id);
+        const limit = effBetLimit(balance);
 
         const modal = new ModalBuilder()
           .setCustomId(`rumuma_bet_amount_modal_${raceId}__${encodeURIComponent(horse)}`)
@@ -607,7 +711,7 @@ client.on("interactionCreate", async (interaction) => {
             new ActionRowBuilder().addComponents(
               new TextInputBuilder()
                 .setCustomId("amounts")
-                .setLabel(`金額（残高: ${fmt(balance)}S / スペース・カンマ区切りで複数可）`)
+                .setLabel(`金額（残高: ${fmt(balance)}S / 1回上限: ${fmt(limit)}S / スペース・カンマ区切り可）`)
                 .setStyle(TextInputStyle.Short)
                 .setRequired(true)
             )
@@ -762,77 +866,98 @@ client.on("interactionCreate", async (interaction) => {
         return ephemeralReply(interaction, { content: `ユーザー:${uid} に ${fmt(amount)} 調整しました` });
       }
 
-      // 旧slot設定モーダルは無効
-      if (interaction.customId === "slot_config_modal") {
-        return ephemeralReply(interaction, { content: "🎰 ジャグラー設定は削除済みです。" }, 20000);
-      }
-
-      // ===== 🎯 High & Low：ベット確定 → 1枚目提示 & 選択ボタン =====
+      // ===== 🎯 High & Low：ベット確定 → 1枚目提示 =====
       if (interaction.customId === "casino_bet_modal_highlow") {
         const uid = interaction.user.id;
         const input = interaction.fields.getTextInputValue("bet")?.trim();
-        const bet = Math.max(1, parseInt(input, 10) || 10);
+        let bet = Math.max(1, parseInt(input, 10) || 10);
 
         const balance = await getBalance(uid);
         if (balance <= 0) {
           return ephemeralReply(interaction, { embeds: [createEmbed("High & Low", "残高0以下のため開始できません。", Colors.Red)] }, 20000);
         }
+        const limit = effBetLimit(balance);
+        if (bet > limit) bet = limit;
         if (balance < bet) {
           return ephemeralReply(interaction, { embeds: [createEmbed("High & Low", `残高不足：必要 ${fmt(bet)}S / 保有 ${fmt(balance)}S`, Colors.Red)] }, 20000);
         }
 
         const first = randInt(1, 13);
         const row = new ActionRowBuilder().addComponents(
-          new ButtonBuilder().setCustomId(`casino_highlow_guess:H:${bet}:${first}:x`).setLabel("🔺 高い").setStyle(ButtonStyle.Primary),
-          new ButtonBuilder().setCustomId(`casino_highlow_guess:L:${bet}:${first}:x`).setLabel("🔻 低い").setStyle(ButtonStyle.Danger)
+          new ButtonBuilder().setCustomId(`casino_highlow_guess:H:${bet}:${first}`).setLabel("🔺 高い").setStyle(ButtonStyle.Primary),
+          new ButtonBuilder().setCustomId(`casino_highlow_guess:L:${bet}:${first}`).setLabel("🔻 低い").setStyle(ButtonStyle.Danger)
         );
 
-        return interaction.reply({
-          embeds: [createEmbed("🎯 High & Low", `🃏 最初のカード: **${first}**\n「高い」か「低い」か選んでください。\n（同値は不正解扱い）`)],
+        // 演出つき案内
+        await interaction.reply({
+          embeds: [createEmbed("🎯 High & Low", `🃏 最初のカード: **${first}**\n「高い」か「低い」か選んでください。\n（同値は不正解扱い）\n*ベット上限：${fmt(limit)}S*`)],
           components: [row],
           ephemeral: true
         });
+        return;
       }
 
-      // ===== 🪙 Coin Toss：ベット確定 → その場で勝敗 =====
+      // ===== 🪙 Coin Toss：ベット確定 → 勝敗（演出） =====
       if (interaction.customId === "casino_bet_modal_cointoss") {
         const uid = interaction.user.id;
         const input = interaction.fields.getTextInputValue("bet")?.trim();
-        const bet = Math.max(1, parseInt(input, 10) || 10);
+        let bet = Math.max(1, parseInt(input, 10) || 10);
 
         const balance = await getBalance(uid);
+        const limit = effBetLimit(balance);
+        if (bet > limit) bet = limit;
         if (balance < bet) {
           return ephemeralReply(interaction, { embeds: [createEmbed("Coin Toss", `残高不足：必要 ${fmt(bet)}S / 保有 ${fmt(balance)}S`, Colors.Red)] }, 20000);
         }
 
+        await interaction.reply({
+          embeds: [createEmbed("🪙 Coin Toss", "🌀 **コイントス中…**")],
+          ephemeral: true
+        });
+        await new Promise(r => setTimeout(r, 700));
+
         const win = Math.random() < 0.5;
         const delta = win ? bet : -bet;
-
         await addCoins(uid, delta, "casino_cointoss", win ? "WIN (50%)" : "LOSE (50%)");
         const final = await getBalance(uid);
 
-        return interaction.reply({
-          embeds: [
-            createEmbed(
-              "🪙 Coin Toss 結果",
-              `${win ? "✅ 勝ち！" : "❌ 負け…"} 変動：**${delta > 0 ? "+" : ""}${fmt(delta)}S**\n残高：**${fmt(final)}S**`,
-              win ? Colors.Yellow : Colors.Red
-            )
-          ],
-          ephemeral: true
+        const components = [];
+        if (delta > 0) {
+          const row = new ActionRowBuilder().addComponents(
+            new ButtonBuilder().setCustomId(`casino_doubleup:${delta}:1`).setLabel("🃏 ダブルアップ！").setStyle(ButtonStyle.Success),
+            new ButtonBuilder().setCustomId("casino_takewin").setLabel("💼 勝ちを確定").setStyle(ButtonStyle.Secondary)
+          );
+          components.push(row);
+        }
+
+        return interaction.editReply({
+          embeds: [createEmbed(
+            "🪙 Coin Toss 結果",
+            `${win ? "✅ 勝ち！" : "❌ 負け…"} 変動：**${delta > 0 ? "+" : ""}${fmt(delta)}S**\n残高：**${fmt(final)}S**${bet > limit ? `\n（ベットは上限 ${fmt(limit)}S に調整されました）` : ""}`,
+            win ? Colors.Yellow : Colors.Red
+          )],
+          components
         });
       }
 
-      // ===== 🎲 Dice Duel：ベット確定 → その場で勝敗 =====
+      // ===== 🎲 Dice Duel：ベット確定 → 勝敗（演出） =====
       if (interaction.customId === "casino_bet_modal_dice") {
         const uid = interaction.user.id;
         const input = interaction.fields.getTextInputValue("bet")?.trim();
-        const bet = Math.max(1, parseInt(input, 10) || 10);
+        let bet = Math.max(1, parseInt(input, 10) || 10);
 
         const balance = await getBalance(uid);
+        const limit = effBetLimit(balance);
+        if (bet > limit) bet = limit;
         if (balance < bet) {
           return ephemeralReply(interaction, { embeds: [createEmbed("Dice Duel", `残高不足：必要 ${fmt(bet)}S / 保有 ${fmt(balance)}S`, Colors.Red)] }, 20000);
         }
+
+        await interaction.reply({
+          embeds: [createEmbed("🎲 Dice Duel", "🎲 **ダイスを振っています…**")],
+          ephemeral: true
+        });
+        await new Promise(r => setTimeout(r, 750));
 
         const p1 = randInt(1, 6), p2 = randInt(1, 6);
         const b1 = randInt(1, 6), b2 = randInt(1, 6);
@@ -855,22 +980,28 @@ client.on("interactionCreate", async (interaction) => {
         await addCoins(uid, delta, "casino_dice", `P:${p1},${p2} B:${b1},${b2}`);
         const final = await getBalance(uid);
 
-        return interaction.reply({
+        const components = [];
+        if (delta > 0) {
+          const row = new ActionRowBuilder().addComponents(
+            new ButtonBuilder().setCustomId(`casino_doubleup:${delta}:1`).setLabel("🃏 ダブルアップ！").setStyle(ButtonStyle.Success),
+            new ButtonBuilder().setCustomId("casino_takewin").setLabel("💼 勝ちを確定").setStyle(ButtonStyle.Secondary)
+          );
+          components.push(row);
+        }
+
+        return interaction.editReply({
           embeds: [
             createEmbed(
               "🎲 Dice Duel 結果",
-              `${line}\n残高：**${fmt(final)}S**`,
+              `${line}\n残高：**${fmt(final)}S**${bet > limit ? `\n（ベットは上限 ${fmt(limit)}S に調整されました）` : ""}`,
               delta > 0 ? Colors.Orange : (delta < 0 ? Colors.Red : Colors.Grey)
             )
           ],
-          ephemeral: true
+          components
         });
       }
 
       // ===== ガチャ：SSRロール作成（演出込み） =====
-    }
-
-    if (interaction.type === InteractionType.ModalSubmit) {
       if (interaction.customId === "gacha_ssr_modal") {
         const roleName = interaction.fields.getTextInputValue("role_name").trim();
         let roleColor = (interaction.fields.getTextInputValue("role_color").trim() || "#FFD700");
@@ -894,10 +1025,10 @@ client.on("interactionCreate", async (interaction) => {
           const member = await guild.members.fetch(interaction.user.id).catch(() => null);
           if (member) await member.roles.add(role).catch(() => {});
 
-          // 一週間で自動削除（従来のまま）
+          // 一週間で自動削除
           setTimeout(async () => { await role.delete("SSRロール有効期限切れ").catch(() => {}); }, 7 * 24 * 60 * 60 * 1000);
 
-          // ここで祝祭演出（ロール名・色を入れて再告知）
+          // 祝祭演出（ロール名込で再告知）
           broadcastSSRWin({
             guild,
             winnerUser: interaction.user,
@@ -910,24 +1041,13 @@ client.on("interactionCreate", async (interaction) => {
             embeds: [createEmbed("SSR当選 🎉", `ロール **${roleName}** を作成し付与しました！（色:${roleColor}）\nこのロールは **Botロール直下** に配置され、1週間後に自動削除されます。`, Colors.Gold)]
           }, 30000);
         } catch (e) {
-          console.error("SSRロール作成失敗:", e);
+          log.error("SSRロール作成失敗:", e);
           return ephemeralReply(interaction, { embeds: [createEmbed("SSRロール", "ロール作成に失敗しました。Botロールの位置と権限を確認してください。", Colors.Red)] }, 30000);
         }
       }
-
-      // 管理：コイン調整
-      if (interaction.customId === "admin_adjust_modal") {
-        const uid = interaction.fields.getTextInputValue("target_user").trim();
-        const amount = parseInt(interaction.fields.getTextInputValue("amount"), 10);
-        if (!Number.isFinite(amount)) return ephemeralReply(interaction, { content: "金額が不正です" });
-        await addCoins(uid, amount, "admin_adjust", "管理者操作");
-        return ephemeralReply(interaction, { content: `ユーザー:${uid} に ${fmt(amount)} 調整しました` });
-      }
-
-      // High & Low／Coin Toss／Dice は 2/3 に記載済みの通り
     }
   } catch (err) {
-    console.error("interaction error:", err);
+    log.error("interaction error:", err);
     if (interaction.isRepliable?.()) {
       await ephemeralReply(interaction, { content: "処理中にエラーが発生しました" }).catch(() => {});
     }
@@ -991,7 +1111,7 @@ client.on(Events.MessageCreate, async (msg) => {
       [h, msg.author.id]
     );
   } catch (e) {
-    console.error("message reward error:", e);
+    log.error("message reward error:", e);
   }
 });
 
@@ -1000,7 +1120,7 @@ client.on(Events.MessageCreate, async (msg) => {
 // ==============================
 schedule.scheduleJob("0 20 * * *", async () => { // UTC20:00 = JST05:00
   await pool.query("DELETE FROM daily_claims");
-  console.log("✅ デイリー受取リセット完了 (JST05:00)");
+  log.info("✅ デイリー受取リセット完了 (JST05:00)");
 });
 
 // ==============================
@@ -1012,22 +1132,24 @@ async function trySendUIById(id, type) {
 }
 
 client.once("ready", async () => {
-  console.log(`✅ Logged in as ${client.user.tag}`);
-  await ensureTables();
+  log.info(`✅ Logged in as ${client.user.tag}`);
+  try {
+    await ensureTables();
+  } catch (e) {
+    log.error("ensureTables failed:", e);
+  }
 
   if (process.env.ADMIN_CHANNEL_ID) {
     await trySendUIById(process.env.ADMIN_CHANNEL_ID, "admin");
   }
-  if (process.env.DAILY_CHANNEL_ID) {
-    await trySendUIById(process.env.DAILY_CHANNEL_ID, "daily");
+  if (DAILY_CHANNEL_ID) {
+    await trySendUIById(DAILY_CHANNEL_ID, "daily");
   }
   if (process.env.RUMUMA_CHANNELS) {
     for (const cid of process.env.RUMUMA_CHANNELS.split(",").map(s => s.trim()).filter(Boolean)) {
       await trySendUIById(cid, "rumuma");
     }
   }
-
-  // ★ ここでカジノメニューを自動送信（ご指定ID）
   if (CASINO_CHANNEL_ID) {
     await trySendUIById(CASINO_CHANNEL_ID, "casino");
   }
@@ -1043,5 +1165,5 @@ http.createServer((req, res) => {
   res.writeHead(200, { "Content-Type": "text/plain" });
   res.end("Bot is running!\n");
 }).listen(PORT, () => {
-  console.log(`🌐 HTTP server running on port ${PORT}`);
+  log.info(`🌐 HTTP server running on port ${PORT}`);
 });
