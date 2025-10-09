@@ -36,6 +36,8 @@ const REWARD_PER_MESSAGE  = parseInt(process.env.REWARD_PER_MESSAGE || "10", 10)
 const REWARD_DAILY_LIMIT  = parseInt(process.env.REWARD_DAILY_LIMIT || "10", 10);
 const REWARD_COOLDOWN_SEC = parseInt(process.env.REWARD_COOLDOWN_SEC || "45", 10);
 const CASINO_CHANNEL_ID   = process.env.CASINO_CHANNEL_ID || ""; // カジノ専用UI
+const CASINO_SLOT_TTL_SEC = parseInt(process.env.CASINO_SLOT_TTL_SEC || "25", 10); // ★ 追加：スロット結果 自動削除TTL
+const CASINO_CLEAN_LIMIT  = parseInt(process.env.CASINO_CLEAN_LIMIT  || "200", 10); // ★ 追加：掃除の最大件数
 
 // ==============================
 // ユーティリティ
@@ -43,7 +45,7 @@ const CASINO_CHANNEL_ID   = process.env.CASINO_CHANNEL_ID || ""; // カジノ専
 function createEmbed(title, desc, color = Colors.Blurple) {
   return new EmbedBuilder().setTitle(title).setDescription(desc).setColor(color);
 }
-const fmt = (n) => Number(n).toLocaleString("ja-JP");
+const fmt = (n) => Number(n).toLocaleString("ja-JP"));
 
 function limitContent(s, limit = 1900) {
   if (!s) return s;
@@ -93,6 +95,41 @@ async function addCoins(userId, amount, type, note = null) {
      VALUES ($1,$2,$3,$4,NOW())`,
     [userId, type, n, note]
   );
+}
+
+// ★ 追加：カジノ掃除ユーティリティ
+async function purgeCasinoMessages(limit = CASINO_CLEAN_LIMIT) {
+  if (!CASINO_CHANNEL_ID) {
+    return { deletedRecent: 0, deletedOld: 0, total: 0, error: "CASINO_CHANNEL_ID が未設定です" };
+  }
+  const ch = await client.channels.fetch(CASINO_CHANNEL_ID).catch(() => null);
+  if (!ch || !ch.isTextBased()) {
+    return { deletedRecent: 0, deletedOld: 0, total: 0, error: "指定チャンネルが見つからないかテキストchではありません" };
+  }
+  const isYoungerThan14d = (m) => (Date.now() - m.createdTimestamp) < (14 * 24 * 60 * 60 * 1000);
+  let fetchedTotal = 0, deletedRecent = 0, deletedOld = 0;
+  let beforeId;
+  while (fetchedTotal < limit) {
+    const remain = Math.min(100, limit - fetchedTotal);
+    const batch = await ch.messages.fetch({ limit: remain, before: beforeId }).catch(() => null);
+    if (!batch || batch.size === 0) break;
+    fetchedTotal += batch.size;
+    beforeId = batch.last()?.id;
+    const mine = batch.filter(m => m.author?.id === client.user.id);
+    if (mine.size > 0) {
+      const recent = mine.filter(isYoungerThan14d);
+      if (recent.size > 0) {
+        const r = await ch.bulkDelete(recent, true).catch(() => null);
+        if (r) deletedRecent += r.size;
+      }
+      const oldOnes = mine.filter(m => !isYoungerThan14d(m));
+      for (const m of oldOnes.values()) {
+        await m.delete().then(() => deletedOld++).catch(() => {});
+      }
+    }
+    if (batch.size < remain) break;
+  }
+  return { deletedRecent, deletedOld, total: deletedRecent + deletedOld, error: null };
 }
 
 // ==============================
@@ -253,10 +290,12 @@ async function replyHistoryEmbeds(interaction, rows) {
 // ==============================
 async function sendUI(channel, type) {
   if (type === "admin") {
+    // ★ 置換：末尾に🧹ボタンを追加
     const row = new ActionRowBuilder().addComponents(
       new ButtonBuilder().setCustomId("admin_adjust").setLabel("⚙️ コイン増減").setStyle(ButtonStyle.Danger),
       new ButtonBuilder().setCustomId("view_history_admin").setLabel("📜 全員取引履歴").setStyle(ButtonStyle.Secondary),
-      new ButtonBuilder().setCustomId("slot_config_open").setLabel("🎰 設定変更").setStyle(ButtonStyle.Primary) // 追加：ジャグラー設定
+      new ButtonBuilder().setCustomId("slot_config_open").setLabel("🎰 設定変更").setStyle(ButtonStyle.Primary),
+      new ButtonBuilder().setCustomId("casino_cleanup").setLabel("🧹 カジノ掃除").setStyle(ButtonStyle.Secondary)
     );
     await channel.send({ content: "管理メニュー", components: [row] });
   }
@@ -450,14 +489,18 @@ function judge(board) {
 async function playCasinoSlot(interaction) {
   const uid = interaction.user.id;
 
-  // 残高チェック
+  // 残高チェック（★ defer→editReply 統一のため、足りない場合でもdefer→edit）
   const balRes = await pool.query(`SELECT balance FROM coins WHERE user_id=$1`, [uid]);
   const balance = balRes.rowCount ? Number(balRes.rows[0].balance) : 0;
+
+  await interaction.deferReply({ ephemeral: true }); // ★統一：最初は必ずdefer
+
   if (balance < JUGGLER_BET) {
-    return interaction.reply({
-      embeds: [createEmbed("🎰 ジャグラー", `残高不足：必要 ${fmt(JUGGLER_BET)}S / 保有 ${fmt(balance)}S`, Colors.Red)],
-      ephemeral: true
+    await interaction.editReply({
+      embeds: [createEmbed("🎰 ジャグラー", `残高不足：必要 ${fmt(JUGGLER_BET)}S / 保有 ${fmt(balance)}S`, Colors.Red)]
     });
+    setTimeout(() => interaction.deleteReply().catch(() => {}), CASINO_SLOT_TTL_SEC * 1000); // ★自動削除
+    return;
   }
 
   // JAG-TIME 状態
@@ -465,11 +508,11 @@ async function playCasinoSlot(interaction) {
   const inJag = (state.mode === "JAG_TIME" && state.spins_left > 0);
   const mode = inJag ? "JAG_TIME" : "NORMAL";
 
-  // 🔧 設定（DB）から動的確率を取得
+  // 設定（DB）から動的確率を取得
   const denoms = await loadSlotConfig();
   const cfg = probsFromDenoms(denoms, mode);
 
-  // スピン・判定・会計（履歴に「役:◯◯」）
+  // スピン・判定・会計
   const finalBoard = spinBoard(cfg);
   const { reward, type } = judge(finalBoard);
   const net = reward - JUGGLER_BET;
@@ -487,8 +530,7 @@ async function playCasinoSlot(interaction) {
     jagAfterSpins = Math.max((state.spins_left || 0) - 1, 0);
   }
 
-  // 最初の表示（1回だけ reply）
-  // JAG-TIME中は残り回数をヘッダ表示
+  // 最初の表示（defer後の1回目はeditReplyで上書き）
   let startTitle = inJag
     ? `💫 JAG-TIME中！（残り ${jagAfterSpins} 回）`
     : "🎰 ジャグラー START!!";
@@ -498,7 +540,7 @@ async function playCasinoSlot(interaction) {
     .setDescription("```\n| ❓ | ❓ | ❓ |\n| ❓ | ❓ | ❓ |\n| ❓ | ❓ | ❓ |\n```")
     .setColor(inJag ? Colors.Aqua : Colors.Blurple);
 
-  await interaction.reply({ embeds: [embed], ephemeral: true });
+  await interaction.editReply({ embeds: [embed] });
 
   // 3段階スピン演出（上書き型）: 350ms→400ms→500ms
   const delays = [350, 400, 500];
@@ -525,7 +567,7 @@ async function playCasinoSlot(interaction) {
   const balAfterRes = await pool.query(`SELECT balance FROM coins WHERE user_id=$1`, [uid]);
   const balAfter = balAfterRes.rowCount ? Number(balAfterRes.rows[0].balance) : 0;
 
-  // 役ごとに色・テキスト強化
+  // 役ごとに色・テキスト強化（★ JAG-TIMEはFieldsに統合／別メッセージ禁止）
   const resultEmbed = new EmbedBuilder()
     .setDescription("```\n" + renderBoard(finalBoard) + "\n```")
     .addFields(
@@ -535,11 +577,10 @@ async function playCasinoSlot(interaction) {
       { name: "現在残高", value: `${fmt(balAfter)}S`, inline: false }
     );
 
-  // 現在モード・残スピン表示（仕様: JAG-TIME情報表示）
   if (jagEntered) {
-    resultEmbed.addFields({ name: "モード", value: `JAG-TIME（残り ${JAG_TIME_SPINS} 回）`, inline: false });
+    resultEmbed.addFields({ name: "モード", value: `💫 JAG-TIME 突入（残り ${JAG_TIME_SPINS} 回）`, inline: false });
   } else if (inJag) {
-    resultEmbed.addFields({ name: "モード", value: `JAG-TIME（残り ${jagAfterSpins} 回）`, inline: false });
+    resultEmbed.addFields({ name: "モード", value: `💫 JAG-TIME 継続中（残り ${jagAfterSpins} 回）`, inline: false });
   } else {
     resultEmbed.addFields({ name: "モード", value: `NORMAL`, inline: false });
   }
@@ -566,31 +607,12 @@ async function playCasinoSlot(interaction) {
       .setFooter({ text: "…シーン" });
   }
 
-  // 少し待って演出切替
+  // 演出反映＆自動削除スケジュール
   await new Promise(r => setTimeout(r, 600));
   await interaction.editReply({ embeds: [resultEmbed] });
 
-  // GOGOランプ 点滅風エフェクト（BIG時のみ軽く2回）
-  if (type === "BIG") {
-    const blinkTexts = ["✨ GOGO! ランプ全点灯 ✨", "　"];
-    for (let i = 0; i < 2; i++) {
-      await new Promise(r => setTimeout(r, 240));
-      await interaction.editReply({
-        embeds: [EmbedBuilder.from(resultEmbed).setFooter({ text: blinkTexts[i % 2] })]
-      });
-    }
-    // 最終は点灯で落ち着く
-    await interaction.editReply({
-      embeds: [EmbedBuilder.from(resultEmbed).setFooter({ text: "✨ GOGO! ランプ全点灯 ✨" })]
-    });
-  }
-
-  // JAG-TIME突入時の告知（仕様：水色＋残スピン数表示）
-  if (jagEntered) {
-    const jagEmbed = createEmbed("💫 JAG-TIME突入！", `BIG/REGボーナスにより突入！\n残りスピン：**${JAG_TIME_SPINS} 回**`, Colors.Aqua);
-    // 既存の結果メッセージを保持しつつ、短時間だけ告知を重ねる
-    await interaction.followUp({ embeds: [jagEmbed], ephemeral: true }).catch(() => {});
-  }
+  // ★ 最後に自動削除（統一）
+  setTimeout(() => interaction.deleteReply().catch(() => {}), CASINO_SLOT_TTL_SEC * 1000);
 }
 
 // ==============================
@@ -626,7 +648,7 @@ client.on("interactionCreate", async (interaction) => {
           await replyHistoryEmbeds(interaction, res.rows);
           return;
         }
-        case "slot_config_open": { // 追加：ジャグラー確率設定（分母）変更
+        case "slot_config_open": {
           if (!interaction.member?.permissions?.has(PermissionsBitField.Flags.Administrator))
             return ephemeralReply(interaction, { content: "管理者権限が必要です" });
           const cfg = await loadSlotConfig();
@@ -648,6 +670,24 @@ client.on("interactionCreate", async (interaction) => {
               )
             );
           return interaction.showModal(modal);
+        }
+        // ★ 追加：カジノ掃除
+        case "casino_cleanup": {
+          if (!interaction.member?.permissions?.has(PermissionsBitField.Flags.Administrator)) {
+            return ephemeralReply(interaction, { content: "管理者権限が必要です" });
+          }
+          await ephemeralReply(interaction, { content: `カジノchのBotメッセージをお掃除中…（最大 ${CASINO_CLEAN_LIMIT} 件）` });
+          const res = await purgeCasinoMessages();
+          if (res.error) {
+            return interaction.followUp({ content: `❌ 失敗: ${res.error}`, ephemeral: true });
+          }
+          const msg = [
+            "🧹 **カジノ掃除 完了**",
+            `・14日以内(一括削除): **${res.deletedRecent}件**`,
+            `・14日超(個別削除): **${res.deletedOld}件**`,
+            `・合計: **${res.total}件**`
+          ].join("\n");
+          return interaction.followUp({ content: msg, ephemeral: true });
         }
 
         /* ===== コイン（デイリー／残高／履歴／ガチャ／ランキング） ===== */
@@ -696,7 +736,7 @@ client.on("interactionCreate", async (interaction) => {
 
         /* ===== レース：一覧 ===== */
         case "rumuma_list": {
-          // 🔧 開催中のみ表示
+          // 開催中のみ表示
           const res = await pool.query(`SELECT * FROM rumuma_races WHERE finished=false ORDER BY id DESC`);
           if (!res.rowCount) return ephemeralReply(interaction, { content: "レースはありません" });
           const list = res.rows.map(r =>
@@ -765,7 +805,7 @@ client.on("interactionCreate", async (interaction) => {
 
         /* ===== 結果報告（ホスト専用） ===== */
         case "rumuma_report_result": {
-          // 🔧 結果未登録の「締切済み」レースのみ
+          // 結果未登録の「締切済み」レースのみ
           const res = await pool.query(`
             SELECT id, race_name, host_id
             FROM rumuma_races
