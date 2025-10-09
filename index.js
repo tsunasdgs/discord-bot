@@ -45,7 +45,8 @@ const CASINO_CLEAN_LIMIT  = parseInt(process.env.CASINO_CLEAN_LIMIT  || "200", 1
 function createEmbed(title, desc, color = Colors.Blurple) {
   return new EmbedBuilder().setTitle(title).setDescription(desc).setColor(color);
 }
-const fmt = (n) => Number(n).toLocaleString("ja-JP"));
+ const fmt = (n) => Number(n).toLocaleString("ja-JP");
+
 
 function limitContent(s, limit = 1900) {
   if (!s) return s;
