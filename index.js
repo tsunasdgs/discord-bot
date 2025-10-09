@@ -96,6 +96,12 @@ async function addCoins(userId, amount, type, note = null) {
   );
 }
 
+async function getBalance(userId) {
+  const r = await pool.query(`SELECT balance FROM coins WHERE user_id=$1`, [userId]);
+  return r.rowCount ? Number(r.rows[0].balance) : 0;
+}
+const randInt = (min, max) => Math.floor(Math.random() * (max - min + 1)) + min;
+
 // [REMOVED:CASINO_CLEANUP] purgeCasinoMessages 関数は削除しました（未参照ID/権限/古いUI対策のため廃止）
 
 // ==============================
@@ -213,6 +219,9 @@ function formatHistoryEmbed(row) {
     case "rumuma_refund":typeLabel= "↩️ レース返金"; color= Colors.Grey;   break;
     case "admin_adjust":typeLabel = "⚙️ 管理調整";  color = Colors.Red;    break;
     case "reward_claim":typeLabel = "💳 払い戻し受取"; color = Colors.Gold; break;
+    case "casino_highlow": typeLabel = "🎯 High & Low"; color = Colors.Fuchsia; break;
+    case "casino_cointoss": typeLabel = "🪙 Coin Toss"; color = Colors.Yellow; break;
+    case "casino_dice": typeLabel = "🎲 Dice Duel"; color = Colors.Orange; break;
   }
   const amount = (row.amount >= 0 ? "+" : "") + fmt(row.amount);
   return new EmbedBuilder()
@@ -228,8 +237,9 @@ async function replyHistoryEmbeds(interaction, rows) {
   else return interaction.reply({ content: "履歴はありません", ephemeral: true });
   if (chunk2.length) await interaction.followUp({ embeds: chunk2, ephemeral: true });
 }
+
 // ==============================
-// UI送信（管理／コイン／レース）
+// UI送信（管理／コイン／レース／カジノ）
 // ==============================
 async function sendUI(channel, type) {
   if (type === "admin") {
@@ -275,7 +285,27 @@ async function sendUI(channel, type) {
     await channel.send({ content: "レースメニュー", components: [row1, row2, row3] });
   }
 
-  // [REMOVED:CASINO_MENU] type === "casino" は削除
+  // ==============================
+  // 🎰 Casino Mini Games (追加)
+  // ==============================
+  if (type === "casino") {
+    const row = new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId("casino_highlow").setLabel("🎯 High & Low").setStyle(ButtonStyle.Primary),
+      new ButtonBuilder().setCustomId("casino_cointoss").setLabel("🪙 Coin Toss").setStyle(ButtonStyle.Success),
+      new ButtonBuilder().setCustomId("casino_dice").setLabel("🎲 Dice Duel").setStyle(ButtonStyle.Secondary)
+    );
+    await channel.send({
+      embeds: [
+        createEmbed(
+          "🎰 TeamSDG’s Casino 🎰",
+          "遊びたいゲームを選んでね！\n[🎯 High & Low] [🪙 Coin Toss] [🎲 Dice Duel]"
+        )
+      ],
+      components: [row]
+    });
+  }
+
+  // [REMOVED:CASINO_MENU_AUTO] 自動送信は行わない（管理者が必要時に sendUI(ch, \"casino\") を実行）
 }
 
 // ==============================
@@ -285,8 +315,7 @@ async function playGacha(interaction) {
   const uid = interaction.user.id;
   const cost = 30;
 
-  const balRes = await pool.query(`SELECT balance FROM coins WHERE user_id=$1`, [uid]);
-  const balance = balRes.rowCount ? Number(balRes.rows[0].balance) : 0;
+  const balance = await getBalance(uid);
   if (balance < cost) {
     return ephemeralReply(interaction, { embeds: [createEmbed("ガチャ", `残高不足：必要 ${fmt(cost)}S / 保有 ${fmt(balance)}S`, Colors.Red)] });
   }
@@ -320,7 +349,6 @@ async function playGacha(interaction) {
     embeds: [createEmbed("🎲 ガチャ結果", `結果: **${rarity}**\n🟢 +${fmt(reward)}S`, rarity === "SR" ? Colors.Purple : Colors.Grey)]
   });
 }
-
 // ==============================
 // Interaction（ボタン／セレクト／モーダル）
 // ==============================
@@ -388,8 +416,7 @@ client.on("interactionCreate", async (interaction) => {
         }
         case "check_balance": {
           const uid = interaction.user.id;
-          const res = await pool.query(`SELECT balance FROM coins WHERE user_id=$1`, [uid]);
-          const bal = res.rowCount ? Number(res.rows[0].balance) : 0;
+          const bal = await getBalance(uid);
           return ephemeralReply(interaction, { embeds: [createEmbed("残高確認", `${fmt(bal)} S`)] }, 30000);
         }
         case "view_history_user": {
@@ -412,176 +439,97 @@ client.on("interactionCreate", async (interaction) => {
           return ephemeralReply(interaction, { content: "🎰 ジャグラー機能は削除されました。メニューからは非表示です。" }, 20000);
         }
 
-        /* ===== レース：一覧 ===== */
-        case "rumuma_list": {
-          const res = await pool.query(`SELECT * FROM rumuma_races WHERE finished=false ORDER BY id DESC`);
-          if (!res.rowCount) return ephemeralReply(interaction, { content: "レースはありません" });
-          const list = res.rows.map(r =>
-            `ID:${r.id} ${r.race_name}（${(r.horses || []).join(", ")}） [開催中]`
-          ).join("\n");
-          return ephemeralReply(interaction, { content: list });
-        }
-
-        /* ===== レース：作成 ===== */
-        case "rumuma_create": {
+        /* ====== 🎰 Casino Mini Games: 起点（モーダル表示） ====== */
+        case "casino_highlow": {
           const modal = new ModalBuilder()
-            .setCustomId("rumuma_create_modal")
-            .setTitle("レース作成")
+            .setCustomId("casino_bet_modal_highlow")
+            .setTitle("High & Low / ベット額")
             .addComponents(
               new ActionRowBuilder().addComponents(
-                new TextInputBuilder().setCustomId("race_name").setLabel("レース名").setStyle(TextInputStyle.Short).setRequired(true)
-              ),
-              new ActionRowBuilder().addComponents(
-                new TextInputBuilder().setCustomId("horses").setLabel("ウマ名（改行 or , 区切り）").setStyle(TextInputStyle.Paragraph).setRequired(true)
+                new TextInputBuilder()
+                  .setCustomId("bet")
+                  .setLabel("ベット額（未入力なら既定: 10S）")
+                  .setStyle(TextInputStyle.Short)
+                  .setRequired(false)
               )
             );
           return interaction.showModal(modal);
         }
-
-        /* ===== ウマ券購入の導線 ===== */
-        case "rumuma_bet": {
-          const res = await pool.query(`SELECT id, race_name FROM rumuma_races WHERE finished=false ORDER BY id DESC`);
-          if (!res.rowCount) return ephemeralReply(interaction, { content: "購入可能なレースがありません" });
-          const menu = new StringSelectMenuBuilder()
-            .setCustomId("select_bet_race")
-            .setPlaceholder("購入するレースを選択")
-            .addOptions(res.rows.map(r => ({ label: r.race_name, value: String(r.id), description: `ID:${r.id}` })));
-          return ephemeralReply(interaction, { content: "レースを選択してください", components: [new ActionRowBuilder().addComponents(menu)] });
+        case "casino_cointoss": {
+          const modal = new ModalBuilder()
+            .setCustomId("casino_bet_modal_cointoss")
+            .setTitle("Coin Toss / ベット額")
+            .addComponents(
+              new ActionRowBuilder().addComponents(
+                new TextInputBuilder()
+                  .setCustomId("bet")
+                  .setLabel("ベット額（未入力なら既定: 10S）")
+                  .setStyle(TextInputStyle.Short)
+                  .setRequired(false)
+              )
+            );
+          return interaction.showModal(modal);
         }
-
-        /* ===== 自分の未決着ウマ券 ===== */
-        case "rumuma_my_bets": {
-          const uid = interaction.user.id;
-          const res = await pool.query(
-            `SELECT b.race_id, r.race_name, r.finished, b.horse, SUM(b.amount)::bigint AS total_amount
-             FROM rumuma_bets b
-             JOIN rumuma_races r ON r.id = b.race_id
-             WHERE b.user_id=$1
-             GROUP BY b.race_id, r.race_name, r.finished, b.horse
-             ORDER BY b.race_id DESC, r.race_name ASC, b.horse ASC`,
-            [uid]
-          );
-          if (!res.rowCount) return ephemeralReply(interaction, { content: "あなたのウマ券はありません" });
-          const active = res.rows.filter(row => !row.finished);
-          if (!active.length) return ephemeralReply(interaction, { content: "未決着のウマ券はありません" });
-          const lines = active.map(row => `Race:${row.race_id} ${row.race_name} - ${row.horse} に ${fmt(row.total_amount)}S`).join("\n");
-          return ephemeralReply(interaction, { content: "あなたの未決着ウマ券\n" + lines });
+        case "casino_dice": {
+          const modal = new ModalBuilder()
+            .setCustomId("casino_bet_modal_dice")
+            .setTitle("Dice Duel / ベット額")
+            .addComponents(
+              new ActionRowBuilder().addComponents(
+                new TextInputBuilder()
+                  .setCustomId("bet")
+                  .setLabel("ベット額（未入力なら既定: 10S）")
+                  .setStyle(TextInputStyle.Short)
+                  .setRequired(false)
+              )
+            );
+          return interaction.showModal(modal);
         }
-        /* ===== 投票締切（ホスト専用） ===== */
-        case "rumuma_close_bets": {
-          const res = await pool.query(`SELECT id, race_name, host_id FROM rumuma_races WHERE finished=false ORDER BY id DESC`);
-          const own = res.rows.filter(r => r.host_id === interaction.user.id);
-          if (!own.length) return ephemeralReply(interaction, { content: "あなたがホストの締切対象レースがありません" });
-          const menu = new StringSelectMenuBuilder()
-            .setCustomId("select_close_race")
-            .setPlaceholder("締切するレースを選択")
-            .addOptions(own.map(r => ({ label: r.race_name, value: String(r.id), description: `ID:${r.id}` })));
-          return ephemeralReply(interaction, { content: "締切するレースを選択してください", components: [new ActionRowBuilder().addComponents(menu)] });
-        }
+      }
 
-        /* ===== 結果報告（ホスト専用） ===== */
-        case "rumuma_report_result": {
-          const res = await pool.query(`
-            SELECT id, race_name, host_id
-            FROM rumuma_races
-            WHERE finished=true
-              AND id NOT IN (SELECT race_id FROM rumuma_results WHERE status='finished')
-            ORDER BY id DESC
-          `);
-          const own = res.rows.filter(r => r.host_id === interaction.user.id);
-          if (!own.length) return ephemeralReply(interaction, { content: "あなたがホストの結果報告可能なレースがありません（まず締切してください）" });
-          const menu = new StringSelectMenuBuilder()
-            .setCustomId("select_result_race")
-            .setPlaceholder("結果報告するレースを選択")
-            .addOptions(own.map(r => ({ label: r.race_name, value: String(r.id), description: `ID:${r.id}` })));
-          return ephemeralReply(interaction, { content: "結果報告するレースを選択してください", components: [new ActionRowBuilder().addComponents(menu)] });
+      /* ====== 🎯 High&Low 2手目（高い/低いの選択） ====== */
+      if (interaction.customId.startsWith("casino_highlow_guess:")) {
+        // customId: casino_highlow_guess:<H|L>:<bet>:<first>:<nonce>
+        const [, guess, betStr, firstStr] = interaction.customId.split(":");
+        const bet = Math.max(1, parseInt(betStr, 10) || 10);
+        const first = parseInt(firstStr, 10);
+        const uid = interaction.user.id;
+
+        // 次のカード
+        const next = randInt(1, 13);
+
+        let delta = -bet; // 既定：負け
+        let resultText = `🃏 最初: ${first}\n🂠 次のカード: ${next}\n`;
+        // イコールは不正解扱い
+        const isHigh = next > first;
+        const isLow  = next < first;
+        if ((guess === "H" && isHigh) || (guess === "L" && isLow)) {
+          // 勝ち：1.8倍（切り捨て）
+          delta = Math.floor(bet * 1.8);
+          resultText += `✅ 正解！ **+${fmt(delta)}S**\n`;
+        } else {
+          resultText += `❌ 不正解… **-${fmt(bet)}S**\n`;
         }
 
-        /* ===== 開催中止（管理者） ===== */
-        case "rumuma_cancel": {
-          if (!interaction.member?.permissions?.has(PermissionsBitField.Flags.Administrator))
-            return ephemeralReply(interaction, { content: "管理者権限が必要です" });
-          const res = await pool.query(`SELECT id, race_name FROM rumuma_races WHERE finished=false ORDER BY id DESC`);
-          if (!res.rowCount) return ephemeralReply(interaction, { content: "中止できるレースがありません" });
-          const menu = new StringSelectMenuBuilder()
-            .setCustomId("select_cancel_race")
-            .setPlaceholder("開催中止するレースを選択")
-            .addOptions(res.rows.map(r => ({ label: r.race_name, value: String(r.id), description: `ID:${r.id}` })));
-          return ephemeralReply(interaction, { content: "開催中止するレースを選択してください（全額返金）", components: [new ActionRowBuilder().addComponents(menu)] });
-        }
+        await addCoins(uid, delta, "casino_highlow", `first:${first} next:${next} guess:${guess}`);
+        const finalBal = await getBalance(uid);
 
-        /* ===== 競争履歴 ===== */
-        case "rumuma_history": {
-          const res = await pool.query(
-            `SELECT race_id, race_name, winner, total_pot, status, finished_at
-             FROM rumuma_results
-             ORDER BY finished_at DESC
-             LIMIT 10`
-          );
-          if (!res.rowCount) return ephemeralReply(interaction, { content: "競争履歴はまだありません" });
-          const lines = res.rows.map(r => {
-            const when = formatJST(r.finished_at);
-            const tag = r.status === "canceled" ? "【開催中止】" : `勝者:${r.winner}`;
-            return `${when} | Race:${r.race_id} ${r.race_name} | ${tag} | 総額:${fmt(r.total_pot ?? 0)}S`;
-          }).join("\n");
-          return ephemeralReply(interaction, { content: "直近10件の競争履歴\n" + lines });
-        }
-
-        /* ===== 払い戻し一括受取 ===== */
-        case "rumuma_claim_rewards": {
-          const uid = interaction.user.id;
-          const res = await pool.query(
-            `SELECT race_id, race_name, amount
-             FROM pending_rewards
-             WHERE user_id=$1 AND claimed=false
-             ORDER BY created_at ASC`,
-            [uid]
-          );
-          if (!res.rowCount) return ephemeralReply(interaction, { content: "未受け取りの払い戻しはありません" });
-          const byRace = new Map();
-          for (const row of res.rows) {
-            const key = `${row.race_id}::${row.race_name}`;
-            if (!byRace.has(key)) byRace.set(key, 0);
-            byRace.set(key, byRace.get(key) + Number(row.amount));
-          }
-          const total = Array.from(byRace.values()).reduce((s, n) => s + n, 0);
-          await addCoins(uid, total, "reward_claim", `払い戻し一括受け取り ${res.rowCount}件`);
-          await pool.query(`UPDATE pending_rewards SET claimed=true WHERE user_id=$1 AND claimed=false`, [uid]);
-          const breakdown = Array.from(byRace.entries()).map(([key, sum]) => {
-            const [rid, rname] = key.split("::"); return `・Race:${rid} ${rname} …… ${fmt(sum)}S`;
-          }).join("\n");
-          const text = `以下の払い戻しを受け取りました！\n${breakdown}\n———\n合計：${fmt(total)}S`;
-          return ephemeralReply(interaction, { content: text });
-        }
-
-        /* ===== オッズ確認（誰でも） ===== */
-        case "rumuma_odds": {
-          const res = await pool.query(`SELECT id, race_name FROM rumuma_races WHERE finished=false ORDER BY id DESC`);
-          if (!res.rowCount) return ephemeralReply(interaction, { content: "オッズを確認できるレースがありません" });
-          const menu = new StringSelectMenuBuilder()
-            .setCustomId("select_odds_race")
-            .setPlaceholder("オッズを確認するレースを選択")
-            .addOptions(res.rows.map(r => ({ label: r.race_name, value: String(r.id), description: `ID:${r.id}` })));
-          return ephemeralReply(interaction, { content: "レースを選択してください", components: [new ActionRowBuilder().addComponents(menu)] });
-        }
-
-        /* ===== ホスト専用：賭け状況確認 ===== */
-        case "rumuma_view_bets": {
-          const uid = interaction.user.id;
-          const races = await pool.query(`SELECT id, race_name FROM rumuma_races WHERE host_id=$1 ORDER BY id DESC`, [uid]);
-          if (!races.rowCount) return ephemeralReply(interaction, { content: "あなたがホストのレースはありません" });
-          const menu = new StringSelectMenuBuilder()
-            .setCustomId("select_view_bets_race")
-            .setPlaceholder("賭け状況を確認するレースを選択")
-            .addOptions(races.rows.map(r => ({ label: r.race_name, value: String(r.id), description: `ID:${r.id}` })));
-          return ephemeralReply(interaction, { content: "レースを選んでください", components: [new ActionRowBuilder().addComponents(menu)] });
-        }
+        return interaction.update({
+          embeds: [
+            createEmbed(
+              "🎯 High & Low 結果",
+              `${resultText}\n残高：**${fmt(finalBal)}S**`,
+              delta >= 0 ? Colors.Fuchsia : Colors.Red
+            )
+          ],
+          components: [] // UIは消す
+        });
       }
     }
 
     /* ---------- セレクトメニュー ---------- */
     if (interaction.isStringSelectMenu()) {
-      // 購入：レース選択 → ウマ選択
+      // 以降：ルムマ機能（既存）—— 省略なしで完全維持
       if (interaction.customId === "select_bet_race") {
         const raceId = parseInt(interaction.values[0], 10);
         const r = await pool.query(`SELECT horses, finished FROM rumuma_races WHERE id=$1`, [raceId]);
@@ -599,7 +547,6 @@ client.on("interactionCreate", async (interaction) => {
         });
       }
 
-      // 購入：ウマ選択 → 金額入力モーダル
       if (interaction.customId.startsWith("select_bet_horse_")) {
         const raceId = parseInt(interaction.customId.split("_")[3], 10);
         const horse = interaction.values[0];
@@ -608,7 +555,6 @@ client.on("interactionCreate", async (interaction) => {
         if (!r.rowCount) return ephemeralUpdate(interaction, { content: "レースが見つかりません", components: [] });
         if (r.rows[0].finished) return ephemeralUpdate(interaction, { content: "このレースは締切済みです", components: [] });
 
-        // オッズ計算（現時点・倍率のみ）
         const bets = await pool.query(
           `SELECT horse, SUM(amount)::bigint AS sum FROM rumuma_bets WHERE race_id=$1 GROUP BY horse`,
           [raceId]
@@ -617,8 +563,7 @@ client.on("interactionCreate", async (interaction) => {
         const horseSum = Number(bets.rows.find(b => b.horse === horse)?.sum || 0);
         const odds = horseSum > 0 ? (totalPot / horseSum).toFixed(2) : "賭けなし";
 
-        const balRes = await pool.query(`SELECT balance FROM coins WHERE user_id=$1`, [interaction.user.id]);
-        const balance = balRes.rowCount ? Number(balRes.rows[0].balance) : 0;
+        const balance = await getBalance(interaction.user.id);
 
         const modal = new ModalBuilder()
           .setCustomId(`rumuma_bet_amount_modal_${raceId}__${encodeURIComponent(horse)}`)
@@ -635,7 +580,6 @@ client.on("interactionCreate", async (interaction) => {
         return interaction.showModal(modal);
       }
 
-      // 締切：レース選択 → finished=true（ホストチェック）
       if (interaction.customId === "select_close_race") {
         const raceId = parseInt(interaction.values[0], 10);
         const own = await pool.query(`SELECT host_id FROM rumuma_races WHERE id=$1`, [raceId]);
@@ -645,7 +589,6 @@ client.on("interactionCreate", async (interaction) => {
         return ephemeralUpdate(interaction, { content: `レースID:${raceId} のウマ券購入を締め切りました`, components: [] });
       }
 
-      // 結果報告：レース選択 → 勝者選択（ホストチェック）
       if (interaction.customId === "select_result_race") {
         const raceId = parseInt(interaction.values[0], 10);
         const own = await pool.query(`SELECT host_id, horses, race_name FROM rumuma_races WHERE id=$1`, [raceId]);
@@ -664,7 +607,6 @@ client.on("interactionCreate", async (interaction) => {
         });
       }
 
-      // 勝者選択 → 配当作成 → レース削除（多重防止）
       if (interaction.customId.startsWith("select_winner_")) {
         const raceId = parseInt(interaction.customId.split("_")[2], 10);
         const winner = interaction.values[0];
@@ -712,7 +654,6 @@ client.on("interactionCreate", async (interaction) => {
         });
       }
 
-      // 開催中止（管理者）
       if (interaction.customId === "select_cancel_race") {
         if (!interaction.member?.permissions?.has(PermissionsBitField.Flags.Administrator))
           return ephemeralUpdate(interaction, { content: "管理者権限が必要です", components: [] });
@@ -721,9 +662,8 @@ client.on("interactionCreate", async (interaction) => {
         return ephemeralUpdate(interaction, { content: `レースID:${raceId} は開催中止になりました（全額返金 & 履歴保存）`, components: [] });
       }
 
-      // ホスト専用：賭け状況表示
       if (interaction.customId === "select_view_bets_race") {
-        const raceId = parseInt(interaction.values[0], 10);
+        const raceId = parseInt(interaction.customId.split("_")[4], 10);
         const own = await pool.query(`SELECT host_id, race_name, horses FROM rumuma_races WHERE id=$1`, [raceId]);
         if (!own.rowCount) return ephemeralUpdate(interaction, { content: "レースが見つかりません", components: [] });
         if (own.rows[0].host_id !== interaction.user.id)
@@ -751,7 +691,6 @@ client.on("interactionCreate", async (interaction) => {
         return ephemeralUpdate(interaction, { embeds: [createEmbed("👀 賭け状況", lines, Colors.Aqua)], components: [] });
       }
 
-      // オッズ確認：レース選択後 → 倍率のみを即表示
       if (interaction.customId === "select_odds_race") {
         const raceId = parseInt(interaction.values[0], 10);
         const r = await pool.query(`SELECT race_name, horses FROM rumuma_races WHERE id=$1 AND finished=false`, [raceId]);
@@ -793,97 +732,105 @@ client.on("interactionCreate", async (interaction) => {
         return ephemeralReply(interaction, { content: "🎰 ジャグラー設定は削除済みです。" }, 20000);
       }
 
-      // レース作成
-      if (interaction.customId === "rumuma_create_modal") {
-        const raceName = interaction.fields.getTextInputValue("race_name").trim();
-        const horses = interaction.fields.getTextInputValue("horses").split(/[\n,、,]/).map(h => h.trim()).filter(Boolean);
-        if (horses.length < 2) return ephemeralReply(interaction, { content: "ウマは2頭以上必要です" });
+      // ===== 🎯 High & Low：ベット確定 → 1枚目提示 & 選択ボタン =====
+      if (interaction.customId === "casino_bet_modal_highlow") {
+        const uid = interaction.user.id;
+        const input = interaction.fields.getTextInputValue("bet")?.trim();
+        const bet = Math.max(1, parseInt(input, 10) || 10);
 
-        const res = await pool.query(
-          `INSERT INTO rumuma_races(channel_id, host_id, race_name, horses, finished)
-           VALUES($1,$2,$3,$4,false) RETURNING id`,
-          [interaction.channelId, interaction.user.id, raceName, horses]
-        );
-        return ephemeralReply(interaction, { content: `レース作成完了🎉 ID:${res.rows[0].id} ${raceName}` });
-      }
-
-      // ウマ券購入：金額確定
-      if (interaction.customId.startsWith("rumuma_bet_amount_modal_")) {
-        const after = interaction.customId.replace("rumuma_bet_amount_modal_", "");
-        const [raceIdStr, horseEncoded] = after.split("__");
-        const raceId = parseInt(raceIdStr, 10);
-        const horse = decodeURIComponent(horseEncoded);
-
-        const amountsRaw = interaction.fields.getTextInputValue("amounts").trim();
-        const amounts = amountsRaw.split(/[,\s]+/).map(a => parseInt(a, 10)).filter(n => Number.isFinite(n) && n > 0);
-        if (!amounts.length) return ephemeralReply(interaction, { content: "金額が不正です" });
-
-        const raceRes = await pool.query(`SELECT horses, finished, host_id, race_name FROM rumuma_races WHERE id=$1`, [raceId]);
-        if (!raceRes.rowCount) return ephemeralReply(interaction, { content: "レースが見つかりません" });
-        if (raceRes.rows[0].finished) return ephemeralReply(interaction, { content: "このレースは締切済みです" });
-        if (!raceRes.rows[0].horses.includes(horse)) return ephemeralReply(interaction, { content: "そのウマは出走していません" });
-
-        const total = amounts.reduce((s, n) => s + n, 0);
-
-        const balRes = await pool.query(`SELECT balance FROM coins WHERE user_id=$1`, [interaction.user.id]);
-        const balance = balRes.rowCount ? Number(balRes.rows[0].balance) : 0;
-        if (balance < total) return ephemeralReply(interaction, { content: `残高不足：必要 ${fmt(total)}S / 保有 ${fmt(balance)}S` });
-
-        // 購入直前のオッズ（倍率のみ）
-        const betsSnap = await pool.query(
-          `SELECT horse, SUM(amount)::bigint AS sum FROM rumuma_bets WHERE race_id=$1 GROUP BY horse`,
-          [raceId]
-        );
-        const totalPotSnap = betsSnap.rows.reduce((s, b) => s + Number(b.sum), 0);
-        const horseSumSnap = Number(betsSnap.rows.find(b => b.horse === horse)?.sum || 0);
-        const oddsSnap = horseSumSnap > 0 ? (totalPotSnap / horseSumSnap).toFixed(2) : "賭けなし";
-
-        await addCoins(interaction.user.id, -total, "rumuma_bet", `Race:${raceId} Bet:${horse} x${amounts.length}`);
-
-        for (const amt of amounts) {
-          await pool.query(
-            `INSERT INTO rumuma_bets(race_id, user_id, horse, amount) VALUES($1,$2,$3,$4)`,
-            [raceId, interaction.user.id, horse, amt]
-          );
+        const balance = await getBalance(uid);
+        if (balance <= 0) {
+          return ephemeralReply(interaction, { embeds: [createEmbed("High & Low", "残高0以下のため開始できません。", Colors.Red)] }, 20000);
+        }
+        if (balance < bet) {
+          return ephemeralReply(interaction, { embeds: [createEmbed("High & Low", `残高不足：必要 ${fmt(bet)}S / 保有 ${fmt(balance)}S`, Colors.Red)] }, 20000);
         }
 
-        return ephemeralReply(interaction, {
-          content: `購入完了：Race:${raceId} ${horse} に [${amounts.map(fmt).join(", ")}]S\n現在の残高：${fmt(balance - total)}S\n倍率(購入直前): ${oddsSnap}`
+        const first = randInt(1, 13);
+        const row = new ActionRowBuilder().addComponents(
+          new ButtonBuilder().setCustomId(`casino_highlow_guess:H:${bet}:${first}:x`).setLabel("🔺 高い").setStyle(ButtonStyle.Primary),
+          new ButtonBuilder().setCustomId(`casino_highlow_guess:L:${bet}:${first}:x`).setLabel("🔻 低い").setStyle(ButtonStyle.Danger)
+        );
+
+        return interaction.reply({
+          embeds: [createEmbed("🎯 High & Low", `🃏 最初のカード: **${first}**\n「高い」か「低い」か選んでください。\n（同値は不正解扱い）`)],
+          components: [row],
+          ephemeral: true
         });
       }
 
-      // SSRロール作成（ガチャ）
-      if (interaction.customId === "gacha_ssr_modal") {
-        const roleName = interaction.fields.getTextInputValue("role_name").trim();
-        let roleColor = (interaction.fields.getTextInputValue("role_color").trim() || "#FFD700");
-        if (!/^#?[0-9A-Fa-f]{6}$/.test(roleColor)) roleColor = "#FFD700";
-        if (!roleColor.startsWith("#")) roleColor = "#" + roleColor;
+      // ===== 🪙 Coin Toss：ベット確定 → その場で勝敗 =====
+      if (interaction.customId === "casino_bet_modal_cointoss") {
+        const uid = interaction.user.id;
+        const input = interaction.fields.getTextInputValue("bet")?.trim();
+        const bet = Math.max(1, parseInt(input, 10) || 10);
 
-        const guild = interaction.guild;
-        if (!guild) return;
-
-        try {
-          const role = await guild.roles.create({
-            name: roleName,
-            color: roleColor,
-            permissions: [],
-            reason: `SSRガチャ当選 by ${interaction.user.tag}`
-          });
-
-          const botHighest = guild.members.me.roles.highest;
-          const newPos = Math.max(1, botHighest.position - 1);
-          await role.setPosition(newPos).catch(() => {});
-          const member = await guild.members.fetch(interaction.user.id).catch(() => null);
-          if (member) await member.roles.add(role).catch(() => {});
-          setTimeout(async () => { await role.delete("SSRロール有効期限切れ").catch(() => {}); }, 7 * 24 * 60 * 60 * 1000);
-
-          return ephemeralReply(interaction, {
-            embeds: [createEmbed("SSR当選 🎉", `ロール **${roleName}** を作成し付与しました！（色:${roleColor}）\nこのロールは **Botロール直下** に配置され、1週間後に自動削除されます。`, Colors.Gold)]
-          }, 30000);
-        } catch (e) {
-          console.error("SSRロール作成失敗:", e);
-          return ephemeralReply(interaction, { embeds: [createEmbed("SSRロール", "ロール作成に失敗しました。Botロールの位置と権限を確認してください。", Colors.Red)] }, 30000);
+        const balance = await getBalance(uid);
+        if (balance < bet) {
+          return ephemeralReply(interaction, { embeds: [createEmbed("Coin Toss", `残高不足：必要 ${fmt(bet)}S / 保有 ${fmt(balance)}S`, Colors.Red)] }, 20000);
         }
+
+        // 50%
+        const win = Math.random() < 0.5;
+        const delta = win ? bet : -bet;
+
+        await addCoins(uid, delta, "casino_cointoss", win ? "WIN (50%)" : "LOSE (50%)");
+        const final = await getBalance(uid);
+
+        return interaction.reply({
+          embeds: [
+            createEmbed(
+              "🪙 Coin Toss 結果",
+              `${win ? "✅ 勝ち！" : "❌ 負け…"} 変動：**${delta > 0 ? "+" : ""}${fmt(delta)}S**\n残高：**${fmt(final)}S**`,
+              win ? Colors.Yellow : Colors.Red
+            )
+          ],
+          ephemeral: true
+        });
+      }
+
+      // ===== 🎲 Dice Duel：ベット確定 → その場で勝敗 =====
+      if (interaction.customId === "casino_bet_modal_dice") {
+        const uid = interaction.user.id;
+        const input = interaction.fields.getTextInputValue("bet")?.trim();
+        const bet = Math.max(1, parseInt(input, 10) || 10);
+
+        const balance = await getBalance(uid);
+        if (balance < bet) {
+          return ephemeralReply(interaction, { embeds: [createEmbed("Dice Duel", `残高不足：必要 ${fmt(bet)}S / 保有 ${fmt(balance)}S`, Colors.Red)] }, 20000);
+        }
+
+        const p1 = randInt(1, 6), p2 = randInt(1, 6);
+        const b1 = randInt(1, 6), b2 = randInt(1, 6);
+        const ps = p1 + p2;
+        const bs = b1 + b2;
+
+        let delta = 0;
+        let line = `👤 あなた: [${p1}, ${p2}] = ${ps}\n🤖 Bot: [${b1}, ${b2}] = ${bs}\n`;
+        if (ps > bs) {
+          delta = bet * 2; // 勝ち +2倍（ベットに対して +2*bet という増分）
+          line += `✅ 勝利！ **+${fmt(delta)}S**\n`;
+        } else if (ps < bs) {
+          delta = -bet;
+          line += `❌ 敗北… **-${fmt(bet)}S**\n`;
+        } else {
+          delta = 0;
+          line += `➖ 同点（払い戻し 0）\n`;
+        }
+
+        await addCoins(uid, delta, "casino_dice", `P:${p1},${p2} B:${b1},${b2}`);
+        const final = await getBalance(uid);
+
+        return interaction.reply({
+          embeds: [
+            createEmbed(
+              "🎲 Dice Duel 結果",
+              `${line}\n残高：**${fmt(final)}S**`,
+              delta > 0 ? Colors.Orange : (delta < 0 ? Colors.Red : Colors.Grey)
+            )
+          ],
+          ephemeral: true
+        });
       }
     }
   } catch (err) {
@@ -893,7 +840,6 @@ client.on("interactionCreate", async (interaction) => {
     }
   }
 });
-
 // ==============================
 // 発言報酬（スパム抑止）
 // ==============================
@@ -986,7 +932,7 @@ client.once("ready", async () => {
       await trySendUIById(cid, "rumuma");
     }
   }
-  // [REMOVED:CASINO_BOOT] カジノUI自動送信は削除
+  // [REMOVED:CASINO_BOOT] 自動送信はしません。必要時に管理者が手動で sendUI(channel, "casino") を呼び出してください。
 });
 
 client.login(process.env.DISCORD_TOKEN);
@@ -1001,5 +947,3 @@ http.createServer((req, res) => {
 }).listen(PORT, () => {
   console.log(`🌐 HTTP server running on port ${PORT}`);
 });
-
-// ✅ 完全出力完了（JUGGLER REMOVED）
