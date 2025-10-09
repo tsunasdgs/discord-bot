@@ -36,7 +36,18 @@ const REWARD_PER_MESSAGE  = parseInt(process.env.REWARD_PER_MESSAGE || "10", 10)
 const REWARD_DAILY_LIMIT  = parseInt(process.env.REWARD_DAILY_LIMIT || "10", 10);
 const REWARD_COOLDOWN_SEC = parseInt(process.env.REWARD_COOLDOWN_SEC || "45", 10);
 
-// [REMOVED:CASINO_ENV] CASINO_CHANNEL_ID / CASINO_SLOT_TTL_SEC / CASINO_CLEAN_LIMIT は削除済み
+// ★ カジノUI自動配置先（明示ID優先／envで上書き可）
+const STATIC_CASINO_CHANNEL_ID = "1424340886585868368";
+const CASINO_CHANNEL_ID = process.env.CASINO_CHANNEL_ID || STATIC_CASINO_CHANNEL_ID;
+
+// ★ ガチャ経済（調整ブロック）
+const GACHA_COST = parseInt(process.env.GACHA_COST || "40", 10);
+// 累積確率で判定（p は累積）
+const GACHA_TABLE = [
+  { p: 0.74, rarity: "S",   reward: 6,   color: Colors.Grey  },
+  { p: 0.98, rarity: "SR",  reward: 15,  color: Colors.Purple},
+  { p: 1.00, rarity: "SSR", reward: 300, color: Colors.Gold  }, // ★ 多めに排出
+];
 
 // ==============================
 // ユーティリティ
@@ -102,7 +113,7 @@ async function getBalance(userId) {
 }
 const randInt = (min, max) => Math.floor(Math.random() * (max - min + 1)) + min;
 
-// [REMOVED:CASINO_CLEANUP] purgeCasinoMessages 関数は削除しました（未参照ID/権限/古いUI対策のため廃止）
+// [REMOVED:CASINO_CLEANUP] purgeCasinoMessages は廃止
 
 // ==============================
 // DB初期化
@@ -173,7 +184,7 @@ async function ensureTables() {
     );
   `);
 
-  // [REMOVED:SLOT_TABLES] slot_states / slot_config の作成を削除
+  // [REMOVED:SLOT_TABLES] 旧スロット用テーブルは作成しない
 }
 
 // ==============================
@@ -209,7 +220,7 @@ function formatHistoryEmbed(row) {
   let color = Colors.Blurple;
 
   switch (row.type) {
-    // [NOTE] 過去の履歴互換：casino_slot は表示のみ存続
+    // [NOTE] 旧slot履歴は互換表示のみ
     case "casino_slot": typeLabel = "🎰（削除済）ジャグラー"; color = Colors.Grey; break;
     case "daily":       typeLabel = "🎁 デイリー";   color = Colors.Green;  break;
     case "msg_reward":  typeLabel = "💬 メッセ報酬"; color = Colors.Blue;   break;
@@ -221,7 +232,7 @@ function formatHistoryEmbed(row) {
     case "reward_claim":typeLabel = "💳 払い戻し受取"; color = Colors.Gold; break;
     case "casino_highlow": typeLabel = "🎯 High & Low"; color = Colors.Fuchsia; break;
     case "casino_cointoss": typeLabel = "🪙 Coin Toss"; color = Colors.Yellow; break;
-    case "casino_dice": typeLabel = "🎲 Dice Duel"; color = Colors.Orange; break;
+    case "casino_dice":   typeLabel = "🎲 Dice Duel"; color = Colors.Orange; break;
   }
   const amount = (row.amount >= 0 ? "+" : "") + fmt(row.amount);
   return new EmbedBuilder()
@@ -237,7 +248,6 @@ async function replyHistoryEmbeds(interaction, rows) {
   else return interaction.reply({ content: "履歴はありません", ephemeral: true });
   if (chunk2.length) await interaction.followUp({ embeds: chunk2, ephemeral: true });
 }
-
 // ==============================
 // UI送信（管理／コイン／レース／カジノ）
 // ==============================
@@ -246,8 +256,6 @@ async function sendUI(channel, type) {
     const row = new ActionRowBuilder().addComponents(
       new ButtonBuilder().setCustomId("admin_adjust").setLabel("⚙️ コイン増減").setStyle(ButtonStyle.Danger),
       new ButtonBuilder().setCustomId("view_history_admin").setLabel("📜 全員取引履歴").setStyle(ButtonStyle.Secondary),
-      // [REMOVED:SLOT_CONFIG_OPEN] .setCustomId("slot_config_open") は削除
-      // [REMOVED:CASINO_CLEANUP] .setCustomId("casino_cleanup") は削除
     );
     await channel.send({ content: "管理メニュー", components: [row] });
   }
@@ -304,8 +312,38 @@ async function sendUI(channel, type) {
       components: [row]
     });
   }
+}
 
-  // [REMOVED:CASINO_MENU_AUTO] 自動送信は行わない（管理者が必要時に sendUI(ch, \"casino\") を実行）
+// ==============================
+// （追加）SSR演出ブロードキャスト
+// ==============================
+async function broadcastSSRWin({ guild, winnerUser, reward, roleName, roleColor }) {
+  try {
+    const channelId = CASINO_CHANNEL_ID;
+    if (!channelId) return;
+    const ch = await (guild ? guild.channels.fetch(channelId).catch(() => null) : client.channels.fetch(channelId).catch(() => null));
+    if (!ch) return;
+
+    const head = "🎆🎆🎆 **SSR 大 当 た り ！** 🎆🎆🎆";
+    const body = [
+      `🎉 <@${winnerUser.id}> さんが **SSR** を引き当てました！`,
+      `💰 祝賀ボーナス：**+${fmt(reward)}S**`,
+      roleName ? `🏷️ ロール作成：**${roleName}**（色:${roleColor || "#FFD700"}）` : null,
+      "",
+      "▶️ みんなも挑戦：ガチャは「コインメニュー」から！",
+      "▶️ 稼ぐなら：カジノやメッセ報酬、デイリーも活用しよう！"
+    ].filter(Boolean).join("\n");
+
+    await ch.send({
+      embeds: [createEmbed(head, body, Colors.Gold)]
+    });
+
+    // 簡易多段演出（花火→紙吹雪）
+    setTimeout(() => ch.send("🎇🎇🎇 **FIREWORKS** 🎇🎇🎇"), 700);
+    setTimeout(() => ch.send("🎊🎊🎊 **CONGRATS!** 🎊🎊🎊"), 1400);
+  } catch (e) {
+    console.error("broadcastSSRWin error:", e);
+  }
 }
 
 // ==============================
@@ -313,24 +351,24 @@ async function sendUI(channel, type) {
 // ==============================
 async function playGacha(interaction) {
   const uid = interaction.user.id;
-  const cost = 30;
-
   const balance = await getBalance(uid);
-  if (balance < cost) {
-    return ephemeralReply(interaction, { embeds: [createEmbed("ガチャ", `残高不足：必要 ${fmt(cost)}S / 保有 ${fmt(balance)}S`, Colors.Red)] });
+
+  if (balance < GACHA_COST) {
+    return ephemeralReply(interaction, { embeds: [createEmbed("ガチャ", `残高不足：必要 ${fmt(GACHA_COST)}S / 保有 ${fmt(balance)}S`, Colors.Red)] });
   }
 
-  await addCoins(uid, -cost, "gacha", "ガチャを回した");
+  await addCoins(uid, -GACHA_COST, "gacha", `ガチャ支払い:${GACHA_COST}S`);
 
-  const roll = Math.random();
-  let rarity = "S", reward = 5;
-  if (roll < 0.70) { rarity = "S"; reward = 5; }
-  else if (roll < 0.95) { rarity = "SR"; reward = 10; }
-  else { rarity = "SSR"; reward = 50; }
+  // 抽選
+  const r = Math.random();
+  const pick = GACHA_TABLE.find(t => r < t.p) || GACHA_TABLE[GACHA_TABLE.length - 1];
+  const { rarity, reward, color } = pick;
 
   await addCoins(uid, reward, "gacha_reward", `ガチャ当選:${rarity}`);
 
+  // 表示
   if (rarity === "SSR") {
+    // SSR：ロール作成モーダル＋先行で派手演出（コイン多め）
     const modal = new ModalBuilder()
       .setCustomId("gacha_ssr_modal")
       .setTitle("SSRロール作成")
@@ -342,11 +380,14 @@ async function playGacha(interaction) {
           new TextInputBuilder().setCustomId("role_color").setLabel("カラーコード（例：#FFD700）").setStyle(TextInputStyle.Short).setRequired(false)
         )
       );
+
+    // 先に当選演出を送る（モーダルは続けて表示）
+    broadcastSSRWin({ guild: interaction.guild, winnerUser: interaction.user, reward, roleName: null, roleColor: null }).catch(() => {});
     return interaction.showModal(modal);
   }
 
   return ephemeralReply(interaction, {
-    embeds: [createEmbed("🎲 ガチャ結果", `結果: **${rarity}**\n🟢 +${fmt(reward)}S`, rarity === "SR" ? Colors.Purple : Colors.Grey)]
+    embeds: [createEmbed("🎲 ガチャ結果", `結果: **${rarity}**\n🟢 +${fmt(reward)}S`, color)]
   });
 }
 // ==============================
@@ -383,16 +424,15 @@ client.on("interactionCreate", async (interaction) => {
           return;
         }
 
-        // [DISABLED:slot_config_open] 旧UIからの誤動作対策
+        // 旧slot UIは無効応答
         case "slot_config_open": {
           return ephemeralReply(interaction, { content: "🎰 ジャグラー機能は削除されました（設定UIは無効です）。" }, 20000);
         }
-        // [DISABLED:casino_cleanup] 旧UIからの誤動作対策
         case "casino_cleanup": {
           return ephemeralReply(interaction, { content: "🎰 ジャグラー関連の掃除機能は削除されました。古いメッセージは手動で削除してください。" }, 20000);
         }
 
-        /* ===== コイン（デイリー／残高／履歴／ガチャ／ランキング） ===== */
+        /* ===== コイン系 ===== */
         case "daily_claim": {
           const uid = interaction.user.id;
           const today = todayJST();
@@ -434,7 +474,7 @@ client.on("interactionCreate", async (interaction) => {
           return ephemeralReply(interaction, { embeds: [createEmbed("🏅 コインランキング（TOP10）", lines, Colors.Gold)] }, 30000);
         }
 
-        // [DISABLED:casino_slot] 旧UIからの誤動作対策
+        // 旧slot起動は封鎖
         case "casino_slot": {
           return ephemeralReply(interaction, { content: "🎰 ジャグラー機能は削除されました。メニューからは非表示です。" }, 20000);
         }
@@ -487,24 +527,20 @@ client.on("interactionCreate", async (interaction) => {
         }
       }
 
-      /* ====== 🎯 High&Low 2手目（高い/低いの選択） ====== */
+      /* ====== 🎯 High&Low 2手目（高い/低い） ====== */
       if (interaction.customId.startsWith("casino_highlow_guess:")) {
-        // customId: casino_highlow_guess:<H|L>:<bet>:<first>:<nonce>
         const [, guess, betStr, firstStr] = interaction.customId.split(":");
         const bet = Math.max(1, parseInt(betStr, 10) || 10);
         const first = parseInt(firstStr, 10);
         const uid = interaction.user.id;
 
-        // 次のカード
         const next = randInt(1, 13);
 
-        let delta = -bet; // 既定：負け
+        let delta = -bet;
         let resultText = `🃏 最初: ${first}\n🂠 次のカード: ${next}\n`;
-        // イコールは不正解扱い
         const isHigh = next > first;
         const isLow  = next < first;
         if ((guess === "H" && isHigh) || (guess === "L" && isLow)) {
-          // 勝ち：1.8倍（切り捨て）
           delta = Math.floor(bet * 1.8);
           resultText += `✅ 正解！ **+${fmt(delta)}S**\n`;
         } else {
@@ -527,9 +563,8 @@ client.on("interactionCreate", async (interaction) => {
       }
     }
 
-    /* ---------- セレクトメニュー ---------- */
+    /* ---------- セレクトメニュー（既存ルムマ一式） ---------- */
     if (interaction.isStringSelectMenu()) {
-      // 以降：ルムマ機能（既存）—— 省略なしで完全維持
       if (interaction.customId === "select_bet_race") {
         const raceId = parseInt(interaction.values[0], 10);
         const r = await pool.query(`SELECT horses, finished FROM rumuma_races WHERE id=$1`, [raceId]);
@@ -727,7 +762,7 @@ client.on("interactionCreate", async (interaction) => {
         return ephemeralReply(interaction, { content: `ユーザー:${uid} に ${fmt(amount)} 調整しました` });
       }
 
-      // [DISABLED:slot_config_modal] 旧UIからの誤動作対策
+      // 旧slot設定モーダルは無効
       if (interaction.customId === "slot_config_modal") {
         return ephemeralReply(interaction, { content: "🎰 ジャグラー設定は削除済みです。" }, 20000);
       }
@@ -770,7 +805,6 @@ client.on("interactionCreate", async (interaction) => {
           return ephemeralReply(interaction, { embeds: [createEmbed("Coin Toss", `残高不足：必要 ${fmt(bet)}S / 保有 ${fmt(balance)}S`, Colors.Red)] }, 20000);
         }
 
-        // 50%
         const win = Math.random() < 0.5;
         const delta = win ? bet : -bet;
 
@@ -808,7 +842,7 @@ client.on("interactionCreate", async (interaction) => {
         let delta = 0;
         let line = `👤 あなた: [${p1}, ${p2}] = ${ps}\n🤖 Bot: [${b1}, ${b2}] = ${bs}\n`;
         if (ps > bs) {
-          delta = bet * 2; // 勝ち +2倍（ベットに対して +2*bet という増分）
+          delta = bet * 2;
           line += `✅ 勝利！ **+${fmt(delta)}S**\n`;
         } else if (ps < bs) {
           delta = -bet;
@@ -832,6 +866,65 @@ client.on("interactionCreate", async (interaction) => {
           ephemeral: true
         });
       }
+
+      // ===== ガチャ：SSRロール作成（演出込み） =====
+    }
+
+    if (interaction.type === InteractionType.ModalSubmit) {
+      if (interaction.customId === "gacha_ssr_modal") {
+        const roleName = interaction.fields.getTextInputValue("role_name").trim();
+        let roleColor = (interaction.fields.getTextInputValue("role_color").trim() || "#FFD700");
+        if (!/^#?[0-9A-Fa-f]{6}$/.test(roleColor)) roleColor = "#FFD700";
+        if (!roleColor.startsWith("#")) roleColor = "#" + roleColor;
+
+        const guild = interaction.guild;
+        if (!guild) return;
+
+        try {
+          const role = await guild.roles.create({
+            name: roleName,
+            color: roleColor,
+            permissions: [],
+            reason: `SSRガチャ当選 by ${interaction.user.tag}`
+          });
+
+          const botHighest = guild.members.me.roles.highest;
+          const newPos = Math.max(1, botHighest.position - 1);
+          await role.setPosition(newPos).catch(() => {});
+          const member = await guild.members.fetch(interaction.user.id).catch(() => null);
+          if (member) await member.roles.add(role).catch(() => {});
+
+          // 一週間で自動削除（従来のまま）
+          setTimeout(async () => { await role.delete("SSRロール有効期限切れ").catch(() => {}); }, 7 * 24 * 60 * 60 * 1000);
+
+          // ここで祝祭演出（ロール名・色を入れて再告知）
+          broadcastSSRWin({
+            guild,
+            winnerUser: interaction.user,
+            reward: GACHA_TABLE[GACHA_TABLE.length - 1].reward,
+            roleName,
+            roleColor
+          }).catch(() => {});
+
+          return ephemeralReply(interaction, {
+            embeds: [createEmbed("SSR当選 🎉", `ロール **${roleName}** を作成し付与しました！（色:${roleColor}）\nこのロールは **Botロール直下** に配置され、1週間後に自動削除されます。`, Colors.Gold)]
+          }, 30000);
+        } catch (e) {
+          console.error("SSRロール作成失敗:", e);
+          return ephemeralReply(interaction, { embeds: [createEmbed("SSRロール", "ロール作成に失敗しました。Botロールの位置と権限を確認してください。", Colors.Red)] }, 30000);
+        }
+      }
+
+      // 管理：コイン調整
+      if (interaction.customId === "admin_adjust_modal") {
+        const uid = interaction.fields.getTextInputValue("target_user").trim();
+        const amount = parseInt(interaction.fields.getTextInputValue("amount"), 10);
+        if (!Number.isFinite(amount)) return ephemeralReply(interaction, { content: "金額が不正です" });
+        await addCoins(uid, amount, "admin_adjust", "管理者操作");
+        return ephemeralReply(interaction, { content: `ユーザー:${uid} に ${fmt(amount)} 調整しました` });
+      }
+
+      // High & Low／Coin Toss／Dice は 2/3 に記載済みの通り
     }
   } catch (err) {
     console.error("interaction error:", err);
@@ -840,6 +933,7 @@ client.on("interactionCreate", async (interaction) => {
     }
   }
 });
+
 // ==============================
 // 発言報酬（スパム抑止）
 // ==============================
@@ -932,7 +1026,11 @@ client.once("ready", async () => {
       await trySendUIById(cid, "rumuma");
     }
   }
-  // [REMOVED:CASINO_BOOT] 自動送信はしません。必要時に管理者が手動で sendUI(channel, "casino") を呼び出してください。
+
+  // ★ ここでカジノメニューを自動送信（ご指定ID）
+  if (CASINO_CHANNEL_ID) {
+    await trySendUIById(CASINO_CHANNEL_ID, "casino");
+  }
 });
 
 client.login(process.env.DISCORD_TOKEN);
