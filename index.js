@@ -97,12 +97,22 @@ async function ephemeralReply(interaction, payload, ms = 15000) {
   setTimeout(() => interaction.deleteReply().catch(() => {}), ms);
   return msg;
 }
-async function ephemeralUpdate(interaction, payload, ms = 15000) {
+
+// ---- 追加：安全更新ヘルパー（ephemeral含む全コンポーネント更新を統一） ----
+async function safeUpdate(interaction, payload) {
+  try {
+    if (!interaction.deferred && !interaction.replied) {
+      await interaction.deferUpdate(); // 3秒制限回避
+    }
+  } catch {}
   const data = { ...payload };
   if (typeof data.content === "string") data.content = limitContent(data.content);
-  const msg = await interaction.update({ ...data });
-  setTimeout(() => interaction.deleteReply().catch(() => {}), ms);
-  return msg;
+  return interaction.editReply(data).catch(() => {});
+}
+
+// 互換：既存コードの ephemeralUpdate を safeUpdate に委譲
+async function ephemeralUpdate(interaction, payload, ms = 15000) {
+  return safeUpdate(interaction, payload);
 }
 
 // 署名（customId改ざん防止）
@@ -412,8 +422,7 @@ async function runShowyEffect(interaction, title, lines){
 }
 
 // ==============================
-// （修正後）ダブルアップのボタン行だけを生成する関数
-//   → 実際の update/editReply は呼び出し側で 1 回で完結させる
+// ダブルアップのボタン行だけ生成（表示は呼び出し側で）
 // ==============================
 function buildDoubleUpRow(userId, gameLabel, wonAmount, step = 0) {
   if (wonAmount <= 0 || step >= DOUBLEUP_MAX_STEPS) return null;
@@ -648,7 +657,7 @@ client.on("interactionCreate", async (interaction) => {
           ? buildDoubleUpRow(uid, "HL", Math.max(0, delta), 0)
           : null;
 
-        return interaction.update({
+        return safeUpdate(interaction, {
           embeds: [
             createEmbed(
               "🎯 High & Low 結果",
@@ -986,7 +995,7 @@ client.on("interactionCreate", async (interaction) => {
 
         if (action === "cx_du_take") {
           // そのまま確定（既に勝ち分は口座に入っている前提。追加動作なし）
-          return interaction.update({
+          return safeUpdate(interaction, {
             embeds:[createEmbed("♠️ Double Up", `勝ち分 **${fmt(winAmount)}S** を確定しました。おめでとう！`, Colors.Gold)],
             components:[]
           });
@@ -994,7 +1003,7 @@ client.on("interactionCreate", async (interaction) => {
 
         if (action === "cx_du_go") {
           if (step >= DOUBLEUP_MAX_STEPS) {
-            return interaction.update({
+            return safeUpdate(interaction, {
               embeds:[createEmbed("♠️ Double Up", `最大回数に達しました。勝ち分 **${fmt(winAmount)}S** は確定です。`, Colors.Gold)],
               components:[]
             });
@@ -1007,14 +1016,14 @@ client.on("interactionCreate", async (interaction) => {
             await addCoins(uid, winAmount, "casino_doubleup", `STEP ${step+1} WIN (${(DOUBLEUP_WIN_RATE*100).toFixed(1)}%) ${gameLabel}`);
             const newStake = winAmount * 2;
             const nextRow = buildDoubleUpRow(uid, gameLabel, newStake, step+1);
-            return interaction.update({
+            return safeUpdate(interaction, {
               embeds:[createEmbed("♠️ Double Up", `✅ 成功！ **+${fmt(winAmount)}S** 上乗せ\n現在の勝ち分：**${fmt(newStake)}S**\n続けますか？（最大${DOUBLEUP_MAX_STEPS}回）`, Colors.Gold)],
               components: nextRow ? [nextRow] : []
             });
           } else {
             // 失敗：元の勝ち分を没収（勝ち分をマイナス計上）
             await addCoins(uid, -winAmount, "casino_doubleup", `STEP ${step+1} LOSE (${(DOUBLEUP_WIN_RATE*100).toFixed(1)}%) ${gameLabel}`);
-            return interaction.update({
+            return safeUpdate(interaction, {
               embeds:[createEmbed("♠️ Double Up", `❌ 失敗… 勝ち分 **-${fmt(winAmount)}S** を没収`, Colors.Red)],
               components:[]
             });
