@@ -411,28 +411,24 @@ async function runShowyEffect(interaction, title, lines){
   return interaction;
 }
 
-// ダブルアップ誘導UI
-async function offerDoubleUp(messageOrInteraction, userId, gameLabel, wonAmount, step=0){
-  if (wonAmount <= 0 || step >= DOUBLEUP_MAX_STEPS) {
-    if ("editReply" in messageOrInteraction) {
-      await messageOrInteraction.editReply({ components: [] }).catch(()=>{});
-    } else if ("edit" in messageOrInteraction) {
-      await messageOrInteraction.edit({ components: [] }).catch(()=>{});
-    }
-    return;
-  }
+// ==============================
+// （修正後）ダブルアップのボタン行だけを生成する関数
+//   → 実際の update/editReply は呼び出し側で 1 回で完結させる
+// ==============================
+function buildDoubleUpRow(userId, gameLabel, wonAmount, step = 0) {
+  if (wonAmount <= 0 || step >= DOUBLEUP_MAX_STEPS) return null;
   const payload = `${userId}:${wonAmount}:${step}:${gameLabel}`;
   const sig = signToken(payload);
-  const row = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId(`cx_du_go:${wonAmount}:${step}:${gameLabel}:${sig}`).setLabel(`♠️ ダブルアップ（${step+1}/${DOUBLEUP_MAX_STEPS}）`).setStyle(ButtonStyle.Danger),
-    new ButtonBuilder().setCustomId(`cx_du_take:${wonAmount}:${step}:${gameLabel}:${sig}`).setLabel("✅ 勝ち分を確定").setStyle(ButtonStyle.Success)
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`cx_du_go:${wonAmount}:${step}:${gameLabel}:${sig}`)
+      .setLabel(`♠️ ダブルアップ（${step + 1}/${DOUBLEUP_MAX_STEPS}）`)
+      .setStyle(ButtonStyle.Danger),
+    new ButtonBuilder()
+      .setCustomId(`cx_du_take:${wonAmount}:${step}:${gameLabel}:${sig}`)
+      .setLabel("✅ 勝ち分を確定")
+      .setStyle(ButtonStyle.Success)
   );
-
-  if ("editReply" in messageOrInteraction) {
-    await messageOrInteraction.editReply({ components:[row] }).catch(()=>{});
-  } else if ("edit" in messageOrInteraction) {
-    await messageOrInteraction.edit({ components:[row] }).catch(()=>{});
-  }
 }
 
 // ==============================
@@ -648,14 +644,9 @@ client.on("interactionCreate", async (interaction) => {
         await addCoins(uid, delta, "casino_highlow", `first:${first} next:${next} guess:${guess}`);
         const finalBal = await getBalance(uid);
 
-        const payload = `${uid}:${Math.max(0, delta)}:0:HL`;
-        const sig = signToken(payload);
         const row = (delta > 0)
-          ? new ActionRowBuilder().addComponents(
-              new ButtonBuilder().setCustomId(`cx_du_go:${Math.max(0, delta)}:0:HL:${sig}`).setLabel(`♠️ ダブルアップ（1/${DOUBLEUP_MAX_STEPS}）`).setStyle(ButtonStyle.Danger),
-              new ButtonBuilder().setCustomId(`cx_du_take:${Math.max(0, delta)}:0:HL:${sig}`).setLabel("✅ 勝ち分を確定").setStyle(ButtonStyle.Success)
-            )
-          : undefined;
+          ? buildDoubleUpRow(uid, "HL", Math.max(0, delta), 0)
+          : null;
 
         return interaction.update({
           embeds: [
@@ -915,6 +906,8 @@ client.on("interactionCreate", async (interaction) => {
         await addCoins(uid, delta, "casino_cointoss", win ? "WIN (50%)" : "LOSE (50%)");
         const final = await getBalance(uid);
 
+        const row = win ? buildDoubleUpRow(uid, "CT", delta, 0) : null;
+
         await interaction.editReply({
           embeds: [
             createEmbed(
@@ -923,13 +916,8 @@ client.on("interactionCreate", async (interaction) => {
               win ? Colors.Yellow : Colors.Red
             )
           ],
-          components: []
+          components: row ? [row] : []
         }).catch(()=>{});
-
-        if (win) {
-          // ダブルアップを提案（勝ち分を賭ける）
-          await offerDoubleUp(interaction, uid, "CT", delta, 0);
-        }
         return;
       }
 
@@ -966,6 +954,8 @@ client.on("interactionCreate", async (interaction) => {
         await addCoins(uid, delta, "casino_dice", `P:${p1},${p2} B:${b1},${b2}`);
         const final = await getBalance(uid);
 
+        const row = delta > 0 ? buildDoubleUpRow(uid, "DD", delta, 0) : null;
+
         await interaction.editReply({
           embeds: [
             createEmbed(
@@ -974,12 +964,8 @@ client.on("interactionCreate", async (interaction) => {
               delta > 0 ? Colors.Orange : (delta < 0 ? Colors.Red : Colors.Grey)
             )
           ],
-          components: []
+          components: row ? [row] : []
         }).catch(()=>{});
-
-        if (delta > 0) {
-          await offerDoubleUp(interaction, uid, "DD", delta, 0);
-        }
         return;
       }
 
@@ -1020,11 +1006,11 @@ client.on("interactionCreate", async (interaction) => {
             // さらに同額上乗せ
             await addCoins(uid, winAmount, "casino_doubleup", `STEP ${step+1} WIN (${(DOUBLEUP_WIN_RATE*100).toFixed(1)}%) ${gameLabel}`);
             const newStake = winAmount * 2;
-            await interaction.update({
+            const nextRow = buildDoubleUpRow(uid, gameLabel, newStake, step+1);
+            return interaction.update({
               embeds:[createEmbed("♠️ Double Up", `✅ 成功！ **+${fmt(winAmount)}S** 上乗せ\n現在の勝ち分：**${fmt(newStake)}S**\n続けますか？（最大${DOUBLEUP_MAX_STEPS}回）`, Colors.Gold)],
-              components:[]
+              components: nextRow ? [nextRow] : []
             });
-            await offerDoubleUp(interaction, uid, gameLabel, newStake, step+1);
           } else {
             // 失敗：元の勝ち分を没収（勝ち分をマイナス計上）
             await addCoins(uid, -winAmount, "casino_doubleup", `STEP ${step+1} LOSE (${(DOUBLEUP_WIN_RATE*100).toFixed(1)}%) ${gameLabel}`);
@@ -1033,7 +1019,6 @@ client.on("interactionCreate", async (interaction) => {
               components:[]
             });
           }
-          return;
         }
       }
     }
