@@ -10,7 +10,8 @@ import {
   EmbedBuilder, InteractionType, PermissionsBitField,
   Events, Colors
 } from "discord.js";
-import { Pool } from "pg";
+import pg from "pg";
+const { Pool } = pg;
 import dotenv from "dotenv";
 import schedule from "node-schedule";
 import crypto from "crypto";
@@ -344,7 +345,7 @@ function formatHistoryEmbed(row) {
     case "rumuma_bet":      typeLabel = "🏇 レースBET"; color = Colors.Aqua;   break;
     case "rumuma_refund":   typeLabel = "↩️ レース返金"; color= Colors.Grey;   break;
     case "admin_adjust":    typeLabel = "⚙️ 管理調整";  color = Colors.Red;    break;
-    case "reward_claim":    typeLabel = "💳 払い戻し受取"; color = Colors.G Gold; break;
+    case "reward_claim":typeLabel = "💳 払い戻し受取"; color = Colors.Gold; break;
     case "casino_highlow":  typeLabel = "🎯 High & Low"; color = Colors.Fuchsia; break;
     case "casino_cointoss": typeLabel = "🪙 Coin Toss"; color = Colors.Yellow; break;
     case "casino_dice":     typeLabel = "🎲 Dice Duel"; color = Colors.Orange; break;
