@@ -552,7 +552,11 @@ client.on("interactionCreate", async (interaction) => {
             [uid, today]
           );
           await addCoins(uid, DAILY_AMOUNT, "daily", "デイリー報酬");
-          return ephemeralReply(interaction, { embeds: [createEmbed("コイン", `${fmt(DAILY_AMOUNT)}Sを受け取りました！", Colors.Green)] });
+        return ephemeralReply(
+  interaction,
+  { embeds: [createEmbed("コイン", `${fmt(DAILY_AMOUNT)}Sを受け取りました！`, Colors.Green)] }
+);
+
         }
         case "check_balance": {
           const uid = interaction.user.id;
