@@ -409,7 +409,7 @@ async function streakLose(uid) {
   return { current: 0 };
 }
 async function getStreak(uid) {
-  const r = await pool.query(`SELECT current, best FROM casino_streaks WHERE user_id=$1`, [uid]);
+  const r = await pool.query(`SELECT current, best FROM casino_streaks WHERE user_id=$1`);
   return r.rowCount ? { current: Number(r.rows[0].current), best: Number(r.rows[0].best) } : { current: 0, best: 0 };
 }
 
@@ -1344,6 +1344,22 @@ client.on("interactionCreate", async (interaction) => {
         return ephemeralReply(interaction, { embeds: [createEmbed("💳 払い戻し", `合計 **+${fmt(total)}S** を受け取りました。`, Colors.Gold)] });
       }
 
+      // ★★★ ここが修正点：ベット入力へ（ボタン） → 金額入力モーダルを開く
+      if (interaction.customId.startsWith("rumuma_bet_amount_go:")) {
+        const [, raceIdStr, horseEnc, sig] = interaction.customId.split(":");
+        const payload = `${raceIdStr}:${horseEnc}`;
+        if (!verifyToken(payload, sig)) return ephemeralReply(interaction, { content: "検証に失敗しました。" }, 8000);
+        const raceId = parseInt(raceIdStr, 10);
+        const horse = decodeURIComponent(horseEnc);
+        const modal = new ModalBuilder()
+          .setCustomId(`rumuma_bet_amount_modal:${raceId}:${encodeURIComponent(horse)}`)
+          .setTitle(`購入金額 / ${horse}`)
+          .addComponents(
+            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId("amount").setLabel("ベット額").setStyle(TextInputStyle.Short).setRequired(true))
+          );
+        return interaction.showModal(modal);
+      }
+
       // Crash/Mines/HL 以外
       return ephemeralReply(interaction, { content: "このボタンは現在利用できません。" }, 8000);
     }
@@ -1591,22 +1607,6 @@ client.on("interactionCreate", async (interaction) => {
         await addCoins(uid, -amt, "rumuma_bet", `race:${raceId} ${horse}`);
         await pool.query(`INSERT INTO rumuma_bets(race_id,user_id,horse,amount) VALUES ($1,$2,$3,$4)`, [raceId, uid, horse, amt]);
         return ephemeralReply(interaction, { embeds: [createEmbed("🎫 ウマ券購入", `#${raceId} / ${horse} に **-${fmt(amt)}S**`)] }, 20000);
-      }
-
-      // 新フロー：オッズ表示の後に「ベット入力へ」→ モーダル表示
-      if (interaction.customId.startsWith("rumuma_bet_amount_go:")) {
-        const [, raceIdStr, horseEnc, sig] = interaction.customId.split(":");
-        const payload = `${raceIdStr}:${horseEnc}`;
-        if (!verifyToken(payload, sig)) return ephemeralReply(interaction, { content: "検証に失敗しました。" }, 8000);
-        const raceId = parseInt(raceIdStr, 10);
-        const horse = decodeURIComponent(horseEnc);
-        const modal = new ModalBuilder()
-          .setCustomId(`rumuma_bet_amount_modal:${raceId}:${encodeURIComponent(horse)}`)
-          .setTitle(`購入金額 / ${horse}`)
-          .addComponents(
-            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId("amount").setLabel("ベット額").setStyle(TextInputStyle.Short).setRequired(true))
-          );
-        return interaction.showModal(modal);
       }
 
       // ルムマ：選択式→金額モーダル結果
