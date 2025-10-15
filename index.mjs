@@ -95,10 +95,12 @@ const MINES_BOMBS_MAX     = 5;
 const MINES_PEEK_PENALTY  = 0.9;
 const MINES_EDGE          = 0.98;
 
-// Crash
-const CRASH_EDGE          = 0.02;
-const CRASH_SPEED_PER_SEC = 0.35;
-const CRASH_MAX_X         = 10.0;
+// Crash（デフォルトを調整：ゆっくり＆即死抑制）
+const CRASH_EDGE               = 0.02;
+const CRASH_SPEED_PER_SEC      = Number(process.env.CRASH_SPEED_PER_SEC || "0.20");
+const CRASH_TICK_MS            = parseInt(process.env.CRASH_TICK_MS || "500", 10);
+const CRASH_MIN_DURATION_SEC   = Number(process.env.CRASH_MIN_DURATION_SEC || "2.0");
+const CRASH_MAX_X              = Number(process.env.CRASH_MAX_X || "10.0");
 
 // UI 自動再掲（デフォルト無効）
 const UI_AUTO_POST_ON_READY = (process.env.UI_AUTO_POST_ON_READY || "false").toLowerCase() === "true";
@@ -133,7 +135,7 @@ const todayJST = () =>
   new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Tokyo", year: "numeric", month: "2-digit", day: "2-digit" })
     .format(new Date()); // YYYY-MM-DD
 
-// Interaction安全応答（★noUpdate=true で元メッセージをupdateしない）
+// Interaction安全応答
 async function respond(interaction, payload, { ephemeral = false, noUpdate = false } = {}) {
   const data = { ...payload };
   if (typeof data.content === "string") data.content = limitContent(data.content);
@@ -552,6 +554,7 @@ async function sendUI(channel, type, opts = {}) {
       new ButtonBuilder().setCustomId("admin_adjust").setLabel("⚙️ コイン増減").setStyle(ButtonStyle.Danger),
       new ButtonBuilder().setCustomId("view_history_admin").setLabel("📜 全員取引履歴").setStyle(ButtonStyle.Secondary),
       new ButtonBuilder().setCustomId("admin_repost_ui").setLabel("🔁 UI再表示").setStyle(ButtonStyle.Primary),
+      new ButtonBuilder().setCustomId("admin_rumuma_reset").setLabel("🧹 レース全リセット（開催中）").setStyle(ButtonStyle.Danger),
     );
     await channel.send({ content: "管理メニュー", components: [row1] });
   }
@@ -603,6 +606,31 @@ async function sendUI(channel, type, opts = {}) {
       components: [row]
     });
   }
+}
+
+// ==============================
+// ルーティング：UI掲示先決定
+// ==============================
+async function resolveUIChannel(type, interaction) {
+  let targetId = null;
+  if (type === "admin") {
+    targetId = process.env.ADMIN_CHANNEL_ID || null;
+  } else if (type === "daily") {
+    targetId = DAILY_CHANNEL_ID || null;
+  } else if (type === "casino") {
+    targetId = CASINO_CHANNEL_ID || null;
+  } else if (type === "rumuma") {
+    targetId = process.env.RUMUMA_DEFAULT_CHANNEL_ID || null;
+    if (!targetId && process.env.RUMUMA_CHANNELS) {
+      const first = process.env.RUMUMA_CHANNELS.split(",").map(s => s.trim()).filter(Boolean)[0];
+      if (first) targetId = first;
+    }
+  }
+  if (targetId) {
+    const ch = await client.channels.fetch(targetId).catch(() => null);
+    if (ch) return ch;
+  }
+  return interaction.channel;
 }
 
 // ==============================
@@ -737,13 +765,14 @@ async function playGacha(interaction) {
     return;
   }
 
-  // S / SR （エフェメラル＋自動削除）
+  // S / SR （エフェメラル＋自動削除＋JP表示）
   await runShowyEffect(interaction, "🎲 ガチャ", `抽選中…\n必要：${fmt(GACHA_COST)}S / 当選で即時付与`);
   await addCoins(uid, -GACHA_COST, "gacha", `ガチャ支払い:${GACHA_COST}S`);
   await jpContribute(GACHA_COST);
   await addCoins(uid, reward, "gacha_reward", `ガチャ当選:${rarity}`);
+  const jp = await jackpotLine();
   await interaction.editReply({
-    embeds: [createEmbed("🎲 ガチャ結果", `結果: **${rarity}**\n🟢 +${fmt(reward)}S`, color)],
+    embeds: [createEmbed("🎲 ガチャ結果", `結果: **${rarity}**\n🟢 +${fmt(reward)}S\n${jp || ""}`, color)],
     components: []
   }).catch(()=>{});
   setTimeout(() => interaction.deleteReply?.().catch(()=>{}), GACHA_RESULT_TTL_MS);
@@ -832,7 +861,7 @@ async function handleMinesPeek(interaction) {
 }
 
 // ==============================
-// Crash：開始/確定
+// Crash：開始/確定（速度/即死の環境変数対応版）
 // ==============================
 async function startCrash(interaction, bet) {
   const uid = interaction.user.id;
@@ -846,7 +875,7 @@ async function startCrash(interaction, bet) {
 
   const sig = signToken(`${uid}:cash`);
   await respond(interaction, {
-    embeds: [createEmbed("📈 Crash", `倍率が上昇します。**クラッシュ前**に「確定」を押すと、その倍率で払い戻し！\n目標は秘密😉`, Colors.Green)],
+    embeds: [createEmbed("📈 Crash", `倍率が上昇します。**クラッシュ前**に「確定」を押すと、その倍率で払い戻し！\n開始直後の即クラッシュは起きにくい設定です（調整可）。`, Colors.Green)],
     components: [ new ActionRowBuilder().addComponents(
       new ButtonBuilder().setCustomId(`crash_cash:${sig}`).setLabel("✅ 確定").setStyle(ButtonStyle.Success)
     ) ]
@@ -857,9 +886,14 @@ async function startCrash(interaction, bet) {
       const r = await pool.query(`SELECT bet, started_at, target_crash, cashed_at FROM casino_crash_sessions WHERE user_id=$1`, [uid]);
       if (!r.rowCount) { clearInterval(crashTimers.get(uid)); crashTimers.delete(uid); return; }
       const s = r.rows[0];
+      const now = Date.now();
+      const tsec = (now - new Date(s.started_at).getTime()) / 1000;
       const nowX = crashMultipleSince(s.started_at);
+
       if (s.cashed_at != null) { clearInterval(crashTimers.get(uid)); crashTimers.delete(uid); return; }
-      if (nowX >= Number(s.target_crash)) {
+
+      // 最低継続時間まではクラッシュさせない
+      if (tsec >= CRASH_MIN_DURATION_SEC && nowX >= Number(s.target_crash)) {
         clearInterval(crashTimers.get(uid)); crashTimers.delete(uid);
         await interaction.editReply({
           embeds: [createEmbed("📈 Crash", `💥 **CRASH** at ${Number(s.target_crash).toFixed(2)}x\n払い戻しなし`, Colors.Red)],
@@ -873,7 +907,7 @@ async function startCrash(interaction, bet) {
       }).catch(()=>{});
     } catch {}
   };
-  const h = setInterval(tick, 350);
+  const h = setInterval(tick, Math.max(300, CRASH_TICK_MS|0));
   crashTimers.set(uid, h);
 }
 async function handleCrashCash(interaction) {
@@ -882,7 +916,9 @@ async function handleCrashCash(interaction) {
   if (!r.rowCount) return ephemeralReply(interaction, { content: "Crashセッションが見つかりません。" });
   const s = r.rows[0];
   const nowX = crashMultipleSince(s.started_at);
-  if (nowX >= Number(s.target_crash)) {
+  const tsec = (Date.now() - new Date(s.started_at).getTime()) / 1000;
+
+  if (tsec >= CRASH_MIN_DURATION_SEC && nowX >= Number(s.target_crash)) {
     await pool.query(`DELETE FROM casino_crash_sessions WHERE user_id=$1`, [uid]);
     clearInterval(crashTimers.get(uid)); crashTimers.delete(uid);
     return respond(interaction, { embeds: [createEmbed("📈 Crash", `💥 **CRASH** at ${Number(s.target_crash).toFixed(2)}x\n払い戻しなし`, Colors.Red)], components: [] });
@@ -906,7 +942,6 @@ function hlNearMissText(first, next) {
   return "";
 }
 function buildHLGuessRow(tag, bet, first, stepOrBlank = "") {
-  // tag: "casino_highlow_guess" | "du_hl_guess"
   const row = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId(`${tag}:H:${bet}:${first}:${stepOrBlank}`).setLabel("🔺 高い").setStyle(ButtonStyle.Primary),
     new ButtonBuilder().setCustomId(`${tag}:L:${bet}:${first}:${stepOrBlank}`).setLabel("🔻 低い").setStyle(ButtonStyle.Danger)
@@ -931,8 +966,9 @@ client.on("interactionCreate", async (interaction) => {
       const name = interaction.commandName;
       if (name === "ui") {
         const type = interaction.options.getString("type", true);
-        await respond(interaction, { content: `UI再表示：${type}` }, { ephemeral: true, noUpdate: true });
-        await sendUI(interaction.channel, type);
+        const targetCh = await resolveUIChannel(type, interaction);
+        await respond(interaction, { content: `UI再表示：**${type}** → <#${targetCh.id}> に投稿します。` }, { ephemeral: true, noUpdate: true });
+        await sendUI(targetCh, type);
         return;
       }
       if (name === "jackpot") {
@@ -980,6 +1016,15 @@ client.on("interactionCreate", async (interaction) => {
           );
         const row = new ActionRowBuilder().addComponents(menu);
         return ephemeralReply(interaction, { content: "UI再表示メニュー", components: [row] }, 30000);
+      }
+      if (interaction.customId === "admin_rumuma_reset") {
+        if (!interaction.member?.permissions?.has(PermissionsBitField.Flags.Administrator))
+          return ephemeralReply(interaction, { content: "管理者権限が必要です" });
+        const menu = new StringSelectMenuBuilder()
+          .setCustomId("admin_rumuma_reset_confirm")
+          .setPlaceholder("⚠️ 開催中の全レースをキャンセルして返金します。続行しますか？")
+          .addOptions({ label: "はい（実行）", value: "yes" }, { label: "いいえ（中止）", value: "no" });
+        return ephemeralReply(interaction, { content: "レース全リセット 確認", components: [new ActionRowBuilder().addComponents(menu)] }, 30000);
       }
 
       // コイン系
@@ -1064,7 +1109,6 @@ client.on("interactionCreate", async (interaction) => {
           return ephemeralReply(interaction, { embeds: [createEmbed("High & Low", `残高不足：必要 ${fmt(bet)}S / 保有 ${fmt(balance)}S`, Colors.Red)] }, 20000);
         }
 
-        // ここでBETを引く（勝っても即時は増やさない：保留管理へ）
         await addCoins(uid, -bet, "casino_highlow", `BET first:${firstStr} guess:${guess}`);
 
         const first = parseInt(firstStr, 10);
@@ -1073,18 +1117,16 @@ client.on("interactionCreate", async (interaction) => {
         const isLow  = next < first;
 
         if ((guess === "H" && isHigh) || (guess === "L" && isLow)) {
-          // 勝利：ストリーク加算＆倍率補正
           const s = await streakWin(uid);
-          const bonusRate = Math.min(s.current, CASINO_STREAK_MAX) * 0.05; // 1連勝ごと+5%、上限CASINO_STREAK_MAX
+          const bonusRate = Math.min(s.current, CASINO_STREAK_MAX) * 0.05; // 1連勝ごと+5%
           const pending = Math.floor(bet * 1.8 * (1 + bonusRate));
-          await duStart(uid, pending, "HL"); // HLダブルアップへ
+          await duStart(uid, pending, "HL");
           const rowHL = buildHLGuessRow("du_hl_guess", pending, randInt(1,13), "0");
           const rowTake = buildDUTakeRow(uid, pending, 0, "HL");
           const near = hlNearMissText(first, next);
           const line = `🃏 最初: ${first}\n🂠 次のカード: ${next}  ${near}\n✅ 正解！ 勝ち分 **${fmt(pending)}S**（連勝補正 +${(bonusRate*100)|0}%）を保留中\n👉 **ダブルアップHL** に挑戦するか「勝ち分を受け取る」`;
           return respond(interaction, { embeds: [createEmbed("🎯 High & Low 結果", line, Colors.Fuchsia)], components: [rowHL, rowTake] });
         } else {
-          // 敗北：ストリークリセット
           await streakLose(uid);
           const line = `🃏 最初: ${first}\n🂠 次のカード: ${next}  ${hlNearMissText(first,next)}\n❌ 不正解… **-${fmt(bet)}S**`;
           const finalBal = await getBalance(uid);
@@ -1104,7 +1146,6 @@ client.on("interactionCreate", async (interaction) => {
         const pending = Number(pendingStr);
         const step = Number(stepStr);
         if (Number(sess.stake) !== pending || Number(sess.step) !== step) {
-          // ボタン古い
           const rowHL = buildHLGuessRow("du_hl_guess", Number(sess.stake), randInt(1,13), String(sess.step||0));
           const rowTake = buildDUTakeRow(uid, Number(sess.stake), Number(sess.step), "HL");
           return respond(interaction, { embeds: [createEmbed("♠️ Double Up", "ボタンが古いため更新しました。")], components: [rowHL, rowTake] });
@@ -1116,7 +1157,6 @@ client.on("interactionCreate", async (interaction) => {
         const isLow  = next < first;
 
         if ((guess === "H" && isHigh) || (guess === "L" && isLow)) {
-          // 勝ち → 倍化 or 自動確定
           await streakWin(uid);
           const nextStake = pending * 2;
           const nextStep = step + 1;
@@ -1131,7 +1171,6 @@ client.on("interactionCreate", async (interaction) => {
           const line = `🃏 ${first} → ${next}  ${hlNearMissText(first,next)}\n✅ 成功！ 現在の勝ち分：**${fmt(nextStake)}S**（${nextStep}/${DOUBLEUP_MAX_STEPS}）`;
           return respond(interaction, { embeds: [createEmbed("♠️ Double Up", line, Colors.Gold)], components: [rowHL, rowTake] });
         } else {
-          // 敗北
           await duClear(uid);
           await streakLose(uid);
           const line = `🃏 ${first} → ${next}  ${hlNearMissText(first,next)}\n❌ 失敗… 勝ち分は没収されました。`;
@@ -1181,14 +1220,20 @@ client.on("interactionCreate", async (interaction) => {
         return handleCrashCash(interaction);
       }
 
-      // ルムマ：UI系ボタン（★選択式フローに対応）
+      // ルムマ：UI系ボタン（選択式フロー強化）
       if (interaction.customId === "rumuma_create") {
         const modal = new ModalBuilder()
           .setCustomId("rumuma_create_modal")
           .setTitle("レース作成")
           .addComponents(
             new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId("race_name").setLabel("レース名").setStyle(TextInputStyle.Short).setRequired(true)),
-            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId("horses").setLabel("出走馬（,区切り）").setStyle(TextInputStyle.Paragraph).setRequired(true))
+            new ActionRowBuilder().addComponents(
+              new TextInputBuilder()
+                .setCustomId("horses")
+                .setLabel("出走馬（カンマ/読点/スペース/改行で区切り）")
+                .setStyle(TextInputStyle.Paragraph)
+                .setRequired(true)
+            )
           );
         return interaction.showModal(modal);
       }
@@ -1253,7 +1298,6 @@ client.on("interactionCreate", async (interaction) => {
       // ---- 結果報告：選択式 ----
       if (interaction.customId === "rumuma_report_result") {
         const r = await pool.query(`SELECT id, race_name FROM rumuma_races WHERE finished=true AND winner IS NULL ORDER BY id DESC LIMIT 25`);
-        // まだ finished=false のまま運用している場合もあるので finished 条件は緩めに扱う：
         const alt = await pool.query(`SELECT id, race_name FROM rumuma_races WHERE finished=false ORDER BY id DESC LIMIT 25`);
         const rows = r.rowCount ? r.rows : alt.rows;
         if (!rows.length) return ephemeralReply(interaction, { content: "結果報告対象のレースがありません。" });
@@ -1264,13 +1308,17 @@ client.on("interactionCreate", async (interaction) => {
         return ephemeralReply(interaction, { content: "結果報告：レース選択", components: [new ActionRowBuilder().addComponents(menu)] }, 30000);
       }
 
+      // ---- 開催中止：選択式 ----
       if (interaction.customId === "rumuma_cancel") {
-        const modal = new ModalBuilder()
-          .setCustomId("rumuma_cancel_modal")
-          .setTitle("開催中止")
-          .addComponents(new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId("race_id").setLabel("レースID").setStyle(TextInputStyle.Short).setRequired(true)));
-        return interaction.showModal(modal);
+        const r = await pool.query(`SELECT id, race_name FROM rumuma_races ORDER BY id DESC LIMIT 25`);
+        if (!r.rowCount) return ephemeralReply(interaction, { content: "中止対象のレースがありません。" });
+        const menu = new StringSelectMenuBuilder()
+          .setCustomId("rumuma_cancel_pick")
+          .setPlaceholder("中止するレースを選択（返金されます）")
+          .addOptions(...r.rows.map(x => ({ label: `#${x.id} ${x.race_name}`, value: String(x.id) })));
+        return ephemeralReply(interaction, { content: "開催中止：レース選択", components: [new ActionRowBuilder().addComponents(menu)] }, 30000);
       }
+
       if (interaction.customId === "rumuma_history") {
         const r = await pool.query(`SELECT race_id, race_name, winner, total_pot, status, finished_at FROM rumuma_results ORDER BY id DESC LIMIT 10`);
         if (!r.rowCount) return ephemeralReply(interaction, { content: "履歴なし" });
@@ -1290,7 +1338,7 @@ client.on("interactionCreate", async (interaction) => {
         return ephemeralReply(interaction, { embeds: [createEmbed("💳 払い戻し", `合計 **+${fmt(total)}S** を受け取りました。`, Colors.Gold)] });
       }
 
-      // Crash/Mines/HL 以外のボタンはフォールバック
+      // Crash/Mines/HL 以外
       return ephemeralReply(interaction, { content: "このボタンは現在利用できません。" }, 8000);
     }
 
@@ -1298,9 +1346,21 @@ client.on("interactionCreate", async (interaction) => {
     if (interaction.isStringSelectMenu()) {
       if (interaction.customId === "admin_repost_ui_select") {
         const type = interaction.values?.[0];
-        await respond(interaction, { content: `UI再表示：${type}` }, { ephemeral: true });
-        await sendUI(interaction.channel, type);
+        const targetCh = await resolveUIChannel(type, interaction);
+        await respond(interaction, { content: `UI再表示：**${type}** → <#${targetCh.id}> に投稿します。` }, { ephemeral: true });
+        await sendUI(targetCh, type);
         return;
+      }
+      if (interaction.customId === "admin_rumuma_reset_confirm") {
+        if (!interaction.member?.permissions?.has(PermissionsBitField.Flags.Administrator))
+          return ephemeralReply(interaction, { content: "管理者権限が必要です" });
+        const v = interaction.values?.[0];
+        if (v !== "yes") return respond(interaction, { content: "キャンセルしました。"}, { ephemeral:true });
+        const ongoing = await pool.query(`SELECT id FROM rumuma_races WHERE finished=false OR winner IS NULL`);
+        for (const row of ongoing.rows) {
+          await refundRumuma(row.id, "全リセット");
+        }
+        return respond(interaction, { embeds: [createEmbed("🧹 レース全リセット", `開催中のレースをすべて中止・返金しました（履歴は保持）。`)] }, { ephemeral:true });
       }
 
       // 購入：レース選択 → 馬選択
@@ -1315,16 +1375,48 @@ client.on("interactionCreate", async (interaction) => {
           .addOptions(...horses.map(h => ({ label: h, value: h })).slice(0, 25));
         return respond(interaction, { content: "馬を選択してください。", components: [new ActionRowBuilder().addComponents(menu)] });
       }
+
+      // 馬選択 → オッズ表示＋「ベット入力へ」ボタン
       if (interaction.customId.startsWith("rumuma_bet_pick_horse:")) {
         const raceId = parseInt(interaction.customId.split(":")[1], 10);
         const horse = interaction.values?.[0];
-        const modal = new ModalBuilder()
-          .setCustomId(`rumuma_bet_amount_modal:${raceId}:${encodeURIComponent(horse)}`)
-          .setTitle(`購入金額 / ${horse}`)
-          .addComponents(
-            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId("amount").setLabel("ベット額").setStyle(TextInputStyle.Short).setRequired(true))
-          );
-        return interaction.showModal(modal);
+
+        const rr = await pool.query(`
+          SELECT r.id, r.race_name, r.horses,
+                 (SELECT COALESCE(SUM(amount),0) FROM rumuma_bets WHERE race_id=r.id) AS total
+          FROM rumuma_races r WHERE r.id=$1
+        `, [raceId]);
+        if (!rr.rowCount) return respond(interaction, { content: "レースが見つかりません。" });
+
+        const race = rr.rows[0];
+        if (!race.horses.includes(horse)) return respond(interaction, { content: "馬名が出走一覧にありません。" });
+
+        const br = await pool.query(`SELECT horse, SUM(amount) AS amt FROM rumuma_bets WHERE race_id=$1 GROUP BY horse`, [raceId]);
+        const totals = Object.fromEntries(br.rows.map(x => [x.horse, Number(x.amt)]));
+        const totalPot = Number(race.total) || 0;
+        const horsePot = totals[horse] || 0;
+
+        const currentMult = (horsePot === 0 || totalPot === 0) ? "-" : `${(totalPot/horsePot).toFixed(2)}x`;
+        const after100_total  = totalPot + 100;
+        const after100_horse  = horsePot + 100;
+        const after100_mult   = `${(after100_total/after100_horse).toFixed(2)}x`;
+        const after100_payout = Math.floor(after100_total/after100_horse * 100);
+
+        const goSig = signToken(`${raceId}:${encodeURIComponent(horse)}`);
+        const goRow = new ActionRowBuilder().addComponents(
+          new ButtonBuilder().setCustomId(`rumuma_bet_amount_go:${raceId}:${encodeURIComponent(horse)}:${goSig}`).setLabel("📝 ベット入力へ").setStyle(ButtonStyle.Primary),
+        );
+
+        const text = [
+          `#${race.id} ${race.race_name}`,
+          `🎯 馬：**${horse}**`,
+          `📈 現在の想定倍率：**${currentMult}**`,
+          `🧮 参考：100S 賭けた場合 → 仮定倍率 **${after100_mult}** / 期待払戻 **${fmt(after100_payout)}S**`,
+          "",
+          "※ 期待値は現時点の総額ベースの目安です（同時購入で変動します）。"
+        ].join("\n");
+
+        return respond(interaction, { embeds: [createEmbed("🎫 オッズ確認", text)], components: [goRow] });
       }
 
       // 投票締切：レース選択 → 即締切
@@ -1335,11 +1427,12 @@ client.on("interactionCreate", async (interaction) => {
         return respond(interaction, { embeds: [createEmbed("✅ 投票締切", `#${raceId} ${r.rows[0].race_name}`)] });
       }
 
-      // 結果報告：レース選択 → 馬選択で確定
+      // 結果報告：レース選択 → 馬選択で確定（winnerが未設定の時のみ）
       if (interaction.customId === "rumuma_result_pick_race") {
         const raceId = parseInt(interaction.values?.[0], 10);
-        const r = await pool.query(`SELECT race_name, horses FROM rumuma_races WHERE id=$1`, [raceId]);
+        const r = await pool.query(`SELECT race_name, horses, winner FROM rumuma_races WHERE id=$1`, [raceId]);
         if (!r.rowCount) return respond(interaction, { content: "レースが見つかりません。" });
+        if (r.rows[0].winner) return respond(interaction, { content: "このレースは既に結果が確定しています。" });
         const horses = r.rows[0].horses || [];
         const menu = new StringSelectMenuBuilder()
           .setCustomId(`rumuma_result_pick_winner:${raceId}`)
@@ -1351,8 +1444,9 @@ client.on("interactionCreate", async (interaction) => {
         const raceId = parseInt(interaction.customId.split(":")[1], 10);
         const winner = interaction.values?.[0];
 
-        const rr = await pool.query(`SELECT race_name, horses FROM rumuma_races WHERE id=$1`, [raceId]);
+        const rr = await pool.query(`SELECT race_name, horses, winner FROM rumuma_races WHERE id=$1`, [raceId]);
         if (!rr.rowCount) return respond(interaction, { content: "レースが見つかりません。" });
+        if (rr.rows[0].winner) return respond(interaction, { content: "このレースは既に結果が確定しています。" });
         if (!rr.rows[0].horses.includes(winner)) return respond(interaction, { content: "勝ち馬が出走一覧にありません。" });
 
         const bets = await pool.query(`SELECT user_id, horse, amount FROM rumuma_bets WHERE race_id=$1`, [raceId]);
@@ -1376,6 +1470,13 @@ client.on("interactionCreate", async (interaction) => {
           [raceId, rr.rows[0].race_name, rr.rows[0].horses, winner, totalPot]
         );
         return respond(interaction, { embeds: [createEmbed("🏆 結果確定", `#${raceId} ${rr.rows[0].race_name}\n勝者：**${winner}**\n総額：${fmt(totalPot)}S\n勝ち馬購入者に**払い戻し受取**が可能になりました。`)] });
+      }
+
+      // 開催中止：レース選択 → 返金＆キャンセル
+      if (interaction.customId === "rumuma_cancel_pick") {
+        const raceId = parseInt(interaction.values?.[0], 10);
+        await refundRumuma(raceId, "開催中止");
+        return respond(interaction, { embeds: [createEmbed("⛔ 開催中止", `#${raceId} は返金済みです。`)] });
       }
 
       return ephemeralReply(interaction, { content: "未対応のメニューです。" }, 10000);
@@ -1434,10 +1535,14 @@ client.on("interactionCreate", async (interaction) => {
         return startCrash(interaction, bet);
       }
 
-      // ルムマ：作成
+      // ルムマ：作成（日本語区切り対応）
       if (interaction.customId === "rumuma_create_modal") {
         const name = interaction.fields.getTextInputValue("race_name").trim();
-        const horses = interaction.fields.getTextInputValue("horses").split(",").map(s=>s.trim()).filter(Boolean);
+        const raw   = interaction.fields.getTextInputValue("horses");
+        const horses = raw
+          .split(/[,\s、，\n\r\t]+/g)
+          .map(s=>s.trim())
+          .filter(Boolean);
         if (!horses.length) return ephemeralReply(interaction, { content: "出走馬が空です。" });
         const r = await pool.query(
           `INSERT INTO rumuma_races(channel_id, host_id, race_name, horses, finished, winner)
@@ -1446,7 +1551,8 @@ client.on("interactionCreate", async (interaction) => {
         );
         return ephemeralReply(interaction, { embeds: [createEmbed("🏇 レース作成", `#${r.rows[0].id} ${name}\n出走: ${horses.join(", ")}`)] }, 30000);
       }
-      // ルムマ：モーダル購入（後方互換）
+
+      // 後方互換：直接入力モーダル（従来のまま）
       if (interaction.customId === "rumuma_bet_modal") {
         const uid = interaction.user.id;
         const raceId = parseInt(interaction.fields.getTextInputValue("race_id"), 10);
@@ -1463,7 +1569,24 @@ client.on("interactionCreate", async (interaction) => {
         await pool.query(`INSERT INTO rumuma_bets(race_id,user_id,horse,amount) VALUES ($1,$2,$3,$4)`, [raceId, uid, horse, amt]);
         return ephemeralReply(interaction, { embeds: [createEmbed("🎫 ウマ券購入", `#${raceId} / ${horse} に **-${fmt(amt)}S**`)] }, 20000);
       }
-      // ルムマ：選択式での購入金額モーダル
+
+      // 新フロー：オッズ表示の後に「ベット入力へ」→ モーダル表示
+      if (interaction.customId.startsWith("rumuma_bet_amount_go:")) {
+        const [, raceIdStr, horseEnc, sig] = interaction.customId.split(":");
+        const payload = `${raceIdStr}:${horseEnc}`;
+        if (!verifyToken(payload, sig)) return ephemeralReply(interaction, { content: "検証に失敗しました。" }, 8000);
+        const raceId = parseInt(raceIdStr, 10);
+        const horse = decodeURIComponent(horseEnc);
+        const modal = new ModalBuilder()
+          .setCustomId(`rumuma_bet_amount_modal:${raceId}:${encodeURIComponent(horse)}`)
+          .setTitle(`購入金額 / ${horse}`)
+          .addComponents(
+            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId("amount").setLabel("ベット額").setStyle(TextInputStyle.Short).setRequired(true))
+          );
+        return interaction.showModal(modal);
+      }
+
+      // ルムマ：選択式→金額モーダル結果
       if (interaction.customId.startsWith("rumuma_bet_amount_modal:")) {
         const [, raceIdStr, horseEnc] = interaction.customId.split(":");
         const raceId = parseInt(raceIdStr, 10);
@@ -1482,19 +1605,21 @@ client.on("interactionCreate", async (interaction) => {
         return ephemeralReply(interaction, { embeds: [createEmbed("🎫 ウマ券購入", `#${raceId} / ${horse} に **-${fmt(amt)}S**`)] }, 20000);
       }
 
-      // ルムマ：締切（後方互換モーダル）
+      // 後方互換：締切（モーダル）
       if (interaction.customId === "rumuma_close_modal") {
         const raceId = parseInt(interaction.fields.getTextInputValue("race_id"), 10);
         const r = await pool.query(`UPDATE rumuma_races SET finished=true WHERE id=$1 RETURNING race_name`, [raceId]);
         if (!r.rowCount) return ephemeralReply(interaction, { content: "レースが見つかりません。" });
         return ephemeralReply(interaction, { embeds: [createEmbed("✅ 投票締切", `#${raceId} ${r.rows[0].race_name}`)] });
       }
-      // ルムマ：結果（後方互換モーダル）
+
+      // 後方互換：結果（モーダル）— winner未設定時のみ許可
       if (interaction.customId === "rumuma_result_modal") {
         const raceId = parseInt(interaction.fields.getTextInputValue("race_id"), 10);
         const winner = interaction.fields.getTextInputValue("winner").trim();
-        const rr = await pool.query(`SELECT race_name, horses FROM rumuma_races WHERE id=$1`, [raceId]);
+        const rr = await pool.query(`SELECT race_name, horses, winner FROM rumuma_races WHERE id=$1`, [raceId]);
         if (!rr.rowCount) return ephemeralReply(interaction, { content: "レースが見つかりません。" });
+        if (rr.rows[0].winner) return ephemeralReply(interaction, { content: "このレースは既に結果が確定しています。" });
         if (!rr.rows[0].horses.includes(winner)) return ephemeralReply(interaction, { content: "勝ち馬が出走一覧にありません。" });
         const bets = await pool.query(`SELECT user_id, horse, amount FROM rumuma_bets WHERE race_id=$1`, [raceId]);
         const totalPot = bets.rows.reduce((s,b)=>s+Number(b.amount),0);
@@ -1519,7 +1644,7 @@ client.on("interactionCreate", async (interaction) => {
         return ephemeralReply(interaction, { embeds: [createEmbed("🏆 結果確定", `#${raceId} ${rr.rows[0].race_name}\n勝者：**${winner}**\n総額：${fmt(totalPot)}S\n勝ち馬購入者に**払い戻し受取**が可能になりました。`)] }, 30000);
       }
 
-      // ルムマ：中止
+      // 後方互換：中止（モーダル）※新フローは選択式
       if (interaction.customId === "rumuma_cancel_modal") {
         const raceId = parseInt(interaction.fields.getTextInputValue("race_id"), 10);
         await refundRumuma(raceId, "管理操作");
@@ -1533,14 +1658,12 @@ client.on("interactionCreate", async (interaction) => {
         if (roleColor && !/^#?[0-9a-fA-F]{6}$/.test(roleColor)) roleColor = "#FFD700";
         if (roleColor && !roleColor.startsWith("#")) roleColor = `#${roleColor}`;
 
-        // ロール作成/付与
         try {
           const guild = interaction.guild;
           const member = await guild.members.fetch(interaction.user.id);
           let role = guild.roles.cache.find(r => r.name === roleName);
           if (!role) role = await guild.roles.create({ name: roleName, color: roleColor || "#FFD700", reason: "SSR Reward Role" });
           if (!member.roles.cache.has(role.id)) await member.roles.add(role, "SSR Reward");
-          // 遅延告知
           setTimeout(() => {
             broadcastSSRWin({
               guild,
