@@ -861,7 +861,7 @@ async function handleMinesPeek(interaction) {
 }
 
 // ==============================
-// Crash：開始/確定（速度/即死の環境変数対応版）
+// Crash：開始/確定
 // ==============================
 async function startCrash(interaction, bet) {
   const uid = interaction.user.id;
@@ -886,13 +886,11 @@ async function startCrash(interaction, bet) {
       const r = await pool.query(`SELECT bet, started_at, target_crash, cashed_at FROM casino_crash_sessions WHERE user_id=$1`, [uid]);
       if (!r.rowCount) { clearInterval(crashTimers.get(uid)); crashTimers.delete(uid); return; }
       const s = r.rows[0];
-      const now = Date.now();
-      const tsec = (now - new Date(s.started_at).getTime()) / 1000;
       const nowX = crashMultipleSince(s.started_at);
+      const tsec = (Date.now() - new Date(s.started_at).getTime()) / 1000;
 
       if (s.cashed_at != null) { clearInterval(crashTimers.get(uid)); crashTimers.delete(uid); return; }
 
-      // 最低継続時間まではクラッシュさせない
       if (tsec >= CRASH_MIN_DURATION_SEC && nowX >= Number(s.target_crash)) {
         clearInterval(crashTimers.get(uid)); crashTimers.delete(uid);
         await interaction.editReply({
@@ -1237,11 +1235,19 @@ client.on("interactionCreate", async (interaction) => {
           );
         return interaction.showModal(modal);
       }
+
+      // ▼▼ レース一覧：整頓（フィルタ/ソート）UIを提示
       if (interaction.customId === "rumuma_list") {
-        const r = await pool.query(`SELECT id, race_name, horses, finished FROM rumuma_races ORDER BY id DESC LIMIT 10`);
-        if (!r.rowCount) return ephemeralReply(interaction, { content: "開催中のレースはありません。" });
-        const lines = r.rows.map(x => `#${x.id} ${x.race_name} ${x.finished ? "（締切済）" : ""}\n　出走: ${x.horses.join(", ")}`).join("\n");
-        return ephemeralReply(interaction, { embeds: [createEmbed("📃 レース一覧", lines)] }, 30000);
+        const menu = new StringSelectMenuBuilder()
+          .setCustomId("rumuma_list_filter")
+          .setPlaceholder("表示方法を選択")
+          .addOptions(
+            { label: "開催中のみ（新しい順）", value: "open_desc" },
+            { label: "締切済のみ（新しい順）", value: "closed_desc" },
+            { label: "すべて（新しい順）", value: "all_desc" },
+            { label: "すべて（古い順）", value: "all_asc" },
+          );
+        return ephemeralReply(interaction, { content: "レース一覧の表示方法を選んでください。", components: [new ActionRowBuilder().addComponents(menu)] }, 30000);
       }
 
       // ---- 購入：選択式 ----
@@ -1361,6 +1367,23 @@ client.on("interactionCreate", async (interaction) => {
           await refundRumuma(row.id, "全リセット");
         }
         return respond(interaction, { embeds: [createEmbed("🧹 レース全リセット", `開催中のレースをすべて中止・返金しました（履歴は保持）。`)] }, { ephemeral:true });
+      }
+
+      // ▼▼ レース一覧：フィルタ/ソートの実処理
+      if (interaction.customId === "rumuma_list_filter") {
+        const mode = interaction.values?.[0] || "all_desc";
+        let where = "";
+        if (mode.startsWith("open"))   where = "WHERE finished=false";
+        if (mode.startsWith("closed")) where = "WHERE finished=true";
+        const order = mode.endsWith("asc") ? "ASC" : "DESC";
+        const q = `SELECT id, race_name, horses, finished, winner FROM rumuma_races ${where} ORDER BY id ${order} LIMIT 25`;
+        const r = await pool.query(q);
+        if (!r.rowCount) return respond(interaction, { content: "該当レースはありません。" });
+        const lines = r.rows.map(x => {
+          const st = x.winner ? `🏆 ${x.winner}` : (x.finished ? "（締切済）" : "（開催中）");
+          return `#${x.id} ${x.race_name} ${st}\n　出走: ${x.horses.join(", ")}`;
+        }).join("\n");
+        return respond(interaction, { embeds: [createEmbed("📃 レース一覧（整頓）", lines)] });
       }
 
       // 購入：レース選択 → 馬選択
