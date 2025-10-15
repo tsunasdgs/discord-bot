@@ -65,7 +65,7 @@ const GACHA_TABLE = [
   { p: 1.00, rarity: "SSR", reward: GACHA_SSR_REWARD, color: Colors.Gold  },
 ];
 
-// SSRロール付与メッセ遅延
+// SSRロール付与メッセ遅延（＝ネタバレ防止のため演出→ロール入力の順）
 const SSR_ROLE_MESSAGE_DELAY_MS = parseInt(process.env.SSR_ROLE_MESSAGE_DELAY_MS || "3000", 10);
 
 // カジノ共通
@@ -409,7 +409,7 @@ async function streakLose(uid) {
   return { current: 0 };
 }
 async function getStreak(uid) {
-  const r = await pool.query(`SELECT current, best FROM casino_streaks WHERE user_id=$1`);
+  const r = await pool.query(`SELECT current, best FROM casino_streaks WHERE user_id=$1`, [uid]);
   return r.rowCount ? { current: Number(r.rows[0].current), best: Number(r.rows[0].best) } : { current: 0, best: 0 };
 }
 
@@ -632,7 +632,6 @@ async function resolveUIChannel(type, interaction) {
   }
   return interaction.channel;
 }
-
 // ==============================
 // ルムマ：返金
 // ==============================
@@ -732,7 +731,7 @@ function crashMultipleSince(startedAt) {
 const crashTimers = new Map();
 
 // ==============================
-// ガチャ本体（SSRはモーダルACK→非同期処理）
+// ガチャ本体（SSRは演出→ボタン→モーダルの順でネタバレ対策）
 // ==============================
 async function playGacha(interaction) {
   const uid = interaction.user.id;
@@ -745,23 +744,27 @@ async function playGacha(interaction) {
   const { rarity, reward, color } = pick;
 
   if (rarity === "SSR") {
-    // showModalでACK → 以降非同期
-    const modal = new ModalBuilder()
-      .setCustomId("gacha_ssr_modal")
-      .setTitle("SSRロール作成")
-      .addComponents(
-        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId("role_name").setLabel("ロール名（20文字まで）").setStyle(TextInputStyle.Short).setMaxLength(20).setRequired(true)),
-        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId("role_color").setLabel("カラーコード（例：#FFD700）").setStyle(TextInputStyle.Short).setRequired(false))
-      );
-    await interaction.showModal(modal);
+    // 1) 抽選演出（エフェメラル） → 2) 結果 + 「ロール作成」ボタン → 3) モーダル
+    await runShowyEffect(interaction, "🎲 ガチャ", `抽選中…\n必要：${fmt(GACHA_COST)}S / 当選で即時付与`);
 
-    (async () => {
-      await addCoins(uid, -GACHA_COST, "gacha", `ガチャ支払い:${GACHA_COST}S`);
-      await jpContribute(GACHA_COST);
-      await addCoins(uid, reward, "gacha_reward", `ガチャ当選:${rarity}`);
-      await jpTryHitSSR(uid, interaction.guild);
-      // 告知はモーダル完了時（遅延あり）
-    })().catch(()=>{});
+    // 経済処理（公開演出前に完了させるが、UIはエフェメラルのみで原UIは上書きしない）
+    await addCoins(uid, -GACHA_COST, "gacha", `ガチャ支払い:${GACHA_COST}S`);
+    await jpContribute(GACHA_COST);
+    await addCoins(uid, reward, "gacha_reward", `ガチャ当選:${rarity}`);
+    await jpTryHitSSR(uid, interaction.guild);
+
+    const jp = await jackpotLine();
+    const payload = `${uid}:openmodal`;
+    const sig = signToken(payload);
+    const row = new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId(`gacha_ssr_open:${uid}:${sig}`).setLabel("🏷️ ロール作成へ").setStyle(ButtonStyle.Primary)
+    );
+    await interaction.editReply({
+      embeds: [createEmbed("🎲 ガチャ結果", `結果: **SSR**\n🟢 +${fmt(reward)}S\n${jp || ""}\n\n祝！ロール名とカラーを入力して記念ロールを作成できます。`, color)],
+      components: [row]
+    }).catch(()=>{});
+    // 結果メッセージは少し残す（既定8秒）
+    setTimeout(() => interaction.deleteReply?.().catch(()=>{}), GACHA_RESULT_TTL_MS);
     return;
   }
 
@@ -1060,6 +1063,23 @@ client.on("interactionCreate", async (interaction) => {
         return ephemeralReply(interaction, { embeds: [createEmbed("🏅 コインランキング（TOP10）", lines, Colors.Gold)] }, 30000);
       }
 
+      // ガチャ：SSR ロール作成ボタン → モーダル表示（ネタバレは演出後）
+      if (interaction.customId.startsWith("gacha_ssr_open:")) {
+        const [, uid, sig] = interaction.customId.split(":");
+        const payload = `${uid}:openmodal`;
+        if (!verifyToken(payload, sig) || interaction.user.id !== uid) {
+          return ephemeralReply(interaction, { content: "権限またはトークン検証に失敗しました。" }, 10000);
+        }
+        const modal = new ModalBuilder()
+          .setCustomId(`gacha_ssr_modal:${uid}:${sig}`)
+          .setTitle("🎊 SSRおめでとう！記念ロール作成")
+          .addComponents(
+            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId("role_name").setLabel("ロール名（20文字まで）").setStyle(TextInputStyle.Short).setMaxLength(20).setRequired(true)),
+            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId("role_color").setLabel("カラー（例：#FFD700）").setStyle(TextInputStyle.Short).setRequired(false))
+          );
+        return interaction.showModal(modal);
+      }
+
       // カジノ起点
       if (interaction.customId === "casino_highlow") {
         const modal = new ModalBuilder()
@@ -1284,7 +1304,8 @@ client.on("interactionCreate", async (interaction) => {
         for (const b of br.rows) totals[b.horse] = Number(b.amt);
         const lines = race.horses.map(h => {
           const t = totals[h] || 0;
-          const share = (t === 0 || Number(race.total) === 0) ? "-" : `${(Number(race.total)/t).toFixed(2)}x`;
+          const total = Number(race.total) || 0;
+          const share = (t === 0 || total === 0) ? "-" : `${(total/t).toFixed(2)}x`;
           return `${h} … 賭け総額 ${fmt(t)}S / 想定倍率 ${share}`;
         }).join("\n");
         return ephemeralReply(interaction, { embeds: [createEmbed(`📈 オッズ #${race.id} ${race.race_name}`, lines)] }, 30000);
@@ -1344,7 +1365,7 @@ client.on("interactionCreate", async (interaction) => {
         return ephemeralReply(interaction, { embeds: [createEmbed("💳 払い戻し", `合計 **+${fmt(total)}S** を受け取りました。`, Colors.Gold)] });
       }
 
-      // ★★★ ここが修正点：ベット入力へ（ボタン） → 金額入力モーダルを開く
+      // ★★★ ルムマ修正点：ベット入力へ（ボタン） → 金額入力モーダルを開く
       if (interaction.customId.startsWith("rumuma_bet_amount_go:")) {
         const [, raceIdStr, horseEnc, sig] = interaction.customId.split(":");
         const payload = `${raceIdStr}:${horseEnc}`;
@@ -1591,7 +1612,7 @@ client.on("interactionCreate", async (interaction) => {
         return ephemeralReply(interaction, { embeds: [createEmbed("🏇 レース作成", `#${r.rows[0].id} ${name}\n出走: ${horses.join(", ")}`)] }, 30000);
       }
 
-      // 後方互換：直接入力モーダル（従来のまま）
+      // 後方互換：直接入力モーダル
       if (interaction.customId === "rumuma_bet_modal") {
         const uid = interaction.user.id;
         const raceId = parseInt(interaction.fields.getTextInputValue("race_id"), 10);
@@ -1636,7 +1657,7 @@ client.on("interactionCreate", async (interaction) => {
         return ephemeralReply(interaction, { embeds: [createEmbed("✅ 投票締切", `#${raceId} ${r.rows[0].race_name}`)] });
       }
 
-      // 後方互換：結果（モーダル）— winner未設定時のみ許可
+      // 後方互換：結果（モーダル）
       if (interaction.customId === "rumuma_result_modal") {
         const raceId = parseInt(interaction.fields.getTextInputValue("race_id"), 10);
         const winner = interaction.fields.getTextInputValue("winner").trim();
@@ -1667,7 +1688,7 @@ client.on("interactionCreate", async (interaction) => {
         return ephemeralReply(interaction, { embeds: [createEmbed("🏆 結果確定", `#${raceId} ${rr.rows[0].race_name}\n勝者：**${winner}**\n総額：${fmt(totalPot)}S\n勝ち馬購入者に**払い戻し受取**が可能になりました。`)] }, 30000);
       }
 
-      // 後方互換：中止（モーダル）※新フローは選択式
+      // 後方互換：中止（モーダル）
       if (interaction.customId === "rumuma_cancel_modal") {
         const raceId = parseInt(interaction.fields.getTextInputValue("race_id"), 10);
         await refundRumuma(raceId, "管理操作");
@@ -1675,7 +1696,12 @@ client.on("interactionCreate", async (interaction) => {
       }
 
       // ガチャ：SSRモーダル（ロール作成＆遅延告知）
-      if (interaction.customId === "gacha_ssr_modal") {
+      if (interaction.customId.startsWith("gacha_ssr_modal:")) {
+        const [, uid, sig] = interaction.customId.split(":");
+        const payload = `${uid}:openmodal`;
+        if (!verifyToken(payload, sig) || interaction.user.id !== uid) {
+          return ephemeralReply(interaction, { content: "権限またはトークン検証に失敗しました。" }, 10000);
+        }
         const roleName = interaction.fields.getTextInputValue("role_name").trim();
         let roleColor = interaction.fields.getTextInputValue("role_color").trim();
         if (roleColor && !/^#?[0-9a-fA-F]{6}$/.test(roleColor)) roleColor = "#FFD700";
@@ -1696,7 +1722,7 @@ client.on("interactionCreate", async (interaction) => {
               roleColor: roleColor || "#FFD700"
             }).catch(()=>{});
           }, SSR_ROLE_MESSAGE_DELAY_MS);
-          return ephemeralReply(interaction, { embeds: [createEmbed("SSRロール", `ロール **${roleName}** を付与しました！\n告知は少し遅れて出ます。`, Colors.Gold)] }, 20000);
+          return ephemeralReply(interaction, { embeds: [createEmbed("🎊 SSRおめでとう！", `ロール **${roleName}** を付与しました！\n祝福メッセージ（全体告知）は少し遅れて流れます。`, Colors.Gold)] }, 20000);
         } catch (e) {
           logError("SSR role create/assign", e);
           return ephemeralReply(interaction, { content: "ロール作成または付与に失敗しました。" }, 15000);
