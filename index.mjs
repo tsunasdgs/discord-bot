@@ -57,6 +57,8 @@ const GACHA_SSR_REWARD = parseInt(
 
 // ガチャ演出 TTL
 const GACHA_RESULT_TTL_MS = parseInt(process.env.GACHA_RESULT_TTL_MS || "8000", 10);
+// ★ 修正: SSR専用の結果TTL（未設定時 600000ms = 10分）
+const GACHA_RESULT_TTL_MS_SSR = parseInt(process.env.GACHA_RESULT_TTL_MS_SSR || "600000", 10); // ★ 修正
 
 // ガチャテーブル（累積確率）
 const GACHA_TABLE = [
@@ -104,6 +106,10 @@ const CRASH_MAX_X              = Number(process.env.CRASH_MAX_X || "10.0");
 
 // UI 自動再掲（デフォルト無効）
 const UI_AUTO_POST_ON_READY = (process.env.UI_AUTO_POST_ON_READY || "false").toLowerCase() === "true";
+
+// ★ 修正: ウマ券一覧の件数/期間（DBは変更せず表示側で制御）
+const RUMUMA_TICKET_HISTORY_LIMIT = parseInt(process.env.RUMUMA_TICKET_HISTORY_LIMIT || "30", 10); // ★ 修正
+const RUMUMA_TICKET_KEEP_DAYS     = parseInt(process.env.RUMUMA_TICKET_KEEP_DAYS || "60", 10);     // ★ 修正
 
 // ==============================
 // ユーティリティ
@@ -763,8 +769,8 @@ async function playGacha(interaction) {
       embeds: [createEmbed("🎲 ガチャ結果", `結果: **SSR**\n🟢 +${fmt(reward)}S\n${jp || ""}\n\n祝！ロール名とカラーを入力して記念ロールを作成できます。`, color)],
       components: [row]
     }).catch(()=>{});
-    // 結果メッセージは少し残す（既定8秒）
-    setTimeout(() => interaction.deleteReply?.().catch(()=>{}), GACHA_RESULT_TTL_MS);
+    // ★ 修正: SSR結果は専用TTLで長く残す（既定10分）
+    setTimeout(() => interaction.deleteReply?.().catch(()=>{}), GACHA_RESULT_TTL_MS_SSR); // ★ 修正
     return;
   }
 
@@ -1139,14 +1145,16 @@ client.on("interactionCreate", async (interaction) => {
           const bonusRate = Math.min(s.current, CASINO_STREAK_MAX) * 0.05; // 1連勝ごと+5%
           const pending = Math.floor(bet * 1.8 * (1 + bonusRate));
           await duStart(uid, pending, "HL");
-          const rowHL = buildHLGuessRow("du_hl_guess", pending, randInt(1,13), "0");
+          // ★ 修正: 直前の next を次ラウンドの first として引き継ぐ
+          const rowHL = buildHLGuessRow("du_hl_guess", pending, next, "0"); // ★ 修正
           const rowTake = buildDUTakeRow(uid, pending, 0, "HL");
           const near = hlNearMissText(first, next);
-          const line = `🃏 最初: ${first}\n🂠 次のカード: ${next}  ${near}\n✅ 正解！ 勝ち分 **${fmt(pending)}S**（連勝補正 +${(bonusRate*100)|0}%）を保留中\n👉 **ダブルアップHL** に挑戦するか「勝ち分を受け取る」`;
+          // ★ 修正: UIに基準カードとルールを明記
+          const line = `🃏 基準カード: **${first}** → **${next}**  ${near}\n✅ 正解！ 勝ち分 **${fmt(pending)}S**（連勝補正 +${(bonusRate*100)|0}%）を保留中\n\n**次のラウンド**\n🃏 現在の基準カード: **${next}**\n🂠 次のカード: **?**\n「高い / 低い」を選んでください（**同値は不正解**）`; // ★ 修正
           return respond(interaction, { embeds: [createEmbed("🎯 High & Low 結果", line, Colors.Fuchsia)], components: [rowHL, rowTake] });
         } else {
           await streakLose(uid);
-          const line = `🃏 最初: ${first}\n🂠 次のカード: ${next}  ${hlNearMissText(first,next)}\n❌ 不正解… **-${fmt(bet)}S**`;
+          const line = `🃏 基準カード: **${first}**\n🂠 次のカード: **${next}**  ${hlNearMissText(first,next)}\n❌ 不正解… **-${fmt(bet)}S**\n（**同値は不正解**）`; // ★ 修正（ルール明示）
           const finalBal = await getBalance(uid);
           return respond(interaction, { embeds: [createEmbed("🎯 High & Low 結果", `${line}\n残高：**${fmt(finalBal)}S**`, Colors.Red)], components: [] });
         }
@@ -1184,14 +1192,16 @@ client.on("interactionCreate", async (interaction) => {
             return respond(interaction, { embeds: [createEmbed("♠️ Double Up", `✅ 最大回数に達したため自動確定：**+${fmt(nextStake)}S**`, Colors.Gold)], components: [] });
           }
           await duSave(uid, nextStake, nextStep);
-          const rowHL = buildHLGuessRow("du_hl_guess", nextStake, randInt(1,13), String(nextStep));
+          // ★ 修正: 直前の next を次ラウンドの first に引き継ぐ
+          const rowHL = buildHLGuessRow("du_hl_guess", nextStake, next, String(nextStep)); // ★ 修正
           const rowTake = buildDUTakeRow(uid, nextStake, nextStep, "HL");
-          const line = `🃏 ${first} → ${next}  ${hlNearMissText(first,next)}\n✅ 成功！ 現在の勝ち分：**${fmt(nextStake)}S**（${nextStep}/${DOUBLEUP_MAX_STEPS}）`;
+          // ★ 修正: UIに基準カードとルール明記
+          const line = `🃏 基準カード: **${first}** → **${next}**  ${hlNearMissText(first,next)}\n✅ 成功！ 現在の勝ち分：**${fmt(nextStake)}S**（${nextStep}/${DOUBLEUP_MAX_STEPS}）\n\n**次のラウンド**\n🃏 現在の基準カード: **${next}**\n🂠 次のカード: **?**（**同値は不正解**）`; // ★ 修正
           return respond(interaction, { embeds: [createEmbed("♠️ Double Up", line, Colors.Gold)], components: [rowHL, rowTake] });
         } else {
           await duClear(uid);
           await streakLose(uid);
-          const line = `🃏 ${first} → ${next}  ${hlNearMissText(first,next)}\n❌ 失敗… 勝ち分は没収されました。`;
+          const line = `🃏 基準カード: **${first}**\n🂠 次のカード: **${next}**  ${hlNearMissText(first,next)}\n❌ 失敗… 勝ち分は没収されました。（**同値は不正解**）`; // ★ 修正
           return respond(interaction, { embeds: [createEmbed("♠️ Double Up", line, Colors.Red)], components: [] });
         }
       }
@@ -1281,16 +1291,77 @@ client.on("interactionCreate", async (interaction) => {
         return ephemeralReply(interaction, { content: "レース選択", components: [new ActionRowBuilder().addComponents(menu)] }, 30000);
       }
 
-      if (interaction.customId === "rumuma_my_bets") {
-        const r = await pool.query(`
-          SELECT b.race_id, b.horse, b.amount, r.race_name, r.finished
-          FROM rumuma_bets b JOIN rumuma_races r ON b.race_id=r.id
-          WHERE b.user_id=$1 ORDER BY b.id DESC LIMIT 10
-        `, [interaction.user.id]);
-        if (!r.rowCount) return ephemeralReply(interaction, { content: "購入履歴はありません。" });
-        const lines = r.rows.map(x => `#${x.race_id} ${x.race_name} / ${x.horse} : ${fmt(x.amount)}S ${x.finished ? "（締切済）" : ""}`).join("\n");
-        return ephemeralReply(interaction, { embeds: [createEmbed("🎫 自分のウマ券", lines)] }, 30000);
-      }
+      // ★ 修正: rumuma_my_bets を強化（4カテゴリ一覧）
+      if (interaction.customId === "rumuma_my_bets") { // ★ 修正
+        const uid = interaction.user.id; // ★ 修正
+        const keepDays = Math.max(1, RUMUMA_TICKET_KEEP_DAYS|0); // ★ 修正
+        const limit = Math.max(1, RUMUMA_TICKET_HISTORY_LIMIT|0); // ★ 修正
+
+        // 勝ち（未受取）
+        const winUnclaimed = await pool.query(
+          `SELECT race_id, race_name, amount, created_at
+             FROM pending_rewards
+            WHERE user_id=$1 AND claimed=false
+              AND created_at >= NOW() - ($2 || ' days')::interval
+            ORDER BY id DESC
+            LIMIT $3`,
+          [uid, keepDays, limit]
+        );
+
+        // 勝ち（受取済）
+        const winClaimed = await pool.query(
+          `SELECT race_id, race_name, amount, created_at
+             FROM pending_rewards
+            WHERE user_id=$1 AND claimed=true
+              AND created_at >= NOW() - ($2 || ' days')::interval
+            ORDER BY id DESC
+            LIMIT $3`,
+          [uid, keepDays, limit]
+        );
+
+        // 未確定（winner 未設定 or finished=false）
+        const pendingBets = await pool.query(
+          `SELECT b.race_id, r.race_name, b.horse, b.amount
+             FROM rumuma_bets b
+             JOIN rumuma_races r ON r.id=b.race_id
+            WHERE b.user_id=$1 AND (r.winner IS NULL OR r.finished=false)
+            ORDER BY b.id DESC
+            LIMIT $2`,
+          [uid, limit]
+        );
+
+        // 負け（winner確定 & 自分の馬≠winner） … 表示期間は結果時刻で絞る
+        const lostBets = await pool.query(
+          `SELECT b.race_id, r.race_name, b.horse, b.amount, rr.finished_at
+             FROM rumuma_bets b
+             JOIN rumuma_races r ON r.id=b.race_id
+             JOIN rumuma_results rr ON rr.race_id=b.race_id
+            WHERE b.user_id=$1 AND r.winner IS NOT NULL AND b.horse <> r.winner
+              AND rr.finished_at >= NOW() - ($2 || ' days')::interval
+            ORDER BY b.id DESC
+            LIMIT $3`,
+          [uid, keepDays, limit]
+        );
+
+        const sec = (title, lines) => lines.length ? `\n**${title}**\n${lines.join("\n")}` : "";
+        const fmtRace = (id,name) => `#${id} ${name}`;
+
+        const linesPending = pendingBets.rows.map(x => `🟡 ${fmtRace(x.race_id, x.race_name)} / 馬:${x.horse} / 購入:${fmt(x.amount)}S`);
+        const linesWinUn   = winUnclaimed.rows.map(x => `🟢 ${fmtRace(x.race_id, x.race_name)} / 受取可:${fmt(x.amount)}S`);
+        const linesWinOK   = winClaimed.rows.map(x => `🔵 ${fmtRace(x.race_id, x.race_name)} / 受取済:${fmt(x.amount)}S / ${formatJST(x.created_at)}`);
+        const linesLost    = lostBets.rows.map(x => `🔴 ${fmtRace(x.race_id, x.race_name)} / 馬:${x.horse} / ${fmt(x.amount)}S / ${formatJST(x.finished_at)}`);
+
+        const body =
+          `直近 **${limit}件 / ${keepDays}日** の表示（DBは削除しません）\n` + // ★ 修正
+          sec("🟡 未確定", linesPending) +
+          sec("🟢 勝ち（未受取）", linesWinUn) +
+          sec("🔵 勝ち（受取済）", linesWinOK) +
+          sec("🔴 負け", linesLost) +
+          `\n\n※ 払い戻しの受取は「💳 払い戻し」ボタン（**rumuma_claim_rewards**）から一括で行えます。`; // ★ 修正
+
+        return ephemeralReply(interaction, { embeds: [createEmbed("🎫 自分のウマ券", body)] }, 60000); // ★ 修正
+      } // ★ 修正 ここまで
+
       if (interaction.customId === "rumuma_odds") {
         const r = await pool.query(`
           SELECT r.id, r.race_name, r.horses, r.finished,
@@ -1564,8 +1635,9 @@ client.on("interactionCreate", async (interaction) => {
         const first = randInt(1, 13);
         await runShowyEffect(interaction, "🎯 High & Low", `ベット：**${fmt(bet)}S**（上限 ${fmt(CASINO_BET_MAX)}S）\n${await streakLine(uid)}`);
         const row = buildHLGuessRow("casino_highlow_guess", bet, first, "");
+        // ★ 修正: UIに「基準カード」と「同値は不正解」「?」を明示
         await interaction.editReply({
-          embeds: [createEmbed("🎯 High & Low", `🃏 最初のカード: **${first}**\n「高い」か「低い」か選んでください。（同値は不正解）`)],
+          embeds: [createEmbed("🎯 High & Low", `🃏 **基準カード: ${first}**\n🂠 次のカード: **?**\n「高い / 低い」を選んでください（**同値は不正解**）`)], // ★ 修正
           components: [row]
         }).catch(()=>{});
         return;
