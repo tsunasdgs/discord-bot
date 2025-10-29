@@ -1107,6 +1107,25 @@ function buildDUTakeRow(uid, stake, step, gameLabel) {
     new ButtonBuilder().setCustomId(`du_take:${stake}:${step}:${gameLabel}:${sig}`).setLabel("✅ 勝ち分を受け取る").setStyle(ButtonStyle.Success)
   );
 }
+// ==============================
+// ✅ iOS対策：3ボタン1行ビルダー（HL用クラスタ）
+// 署名: uid:stake:step:HL を signToken()。中央は du_take。
+// ==============================
+function buildDUClusterRowHL(uid, stake, first, step) {
+  const payload = `${uid}:${stake}:${step}:HL`;
+  const sig = signToken(payload);
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`du_hl_guess:H:${stake}:${first}:${step}`)
+      .setLabel("🔺 高い").setStyle(ButtonStyle.Primary),
+    new ButtonBuilder()
+      .setCustomId(`du_take:${stake}:${step}:HL:${sig}`)
+      .setLabel("✅ 勝ち分を受け取る").setStyle(ButtonStyle.Success),
+    new ButtonBuilder()
+      .setCustomId(`du_hl_guess:L:${stake}:${first}:${step}`)
+      .setLabel("🔻 低い").setStyle(ButtonStyle.Danger),
+  );
+}
 
 // ==============================
 // 返信系ヘルパ（iOS二重エフェメラル防止）
@@ -1389,11 +1408,14 @@ client.on("interactionCreate", async (interaction) => {
           // ✅ HL勝利 → DU開始時に meta.hl.card = next を保存（サーバー権威）
           await duStart(uid, pending, "HL", { hl: { card: next } });
 
+          // 旧2行ビルド（互換のため残すが、表示は1行クラスタへ）
           const rowHL = buildHLGuessRow("du_hl_guess", pending, next, "0");
           const rowTake = buildDUTakeRow(uid, pending, 0, "HL");
+          const rowCluster = buildDUClusterRowHL(uid, pending, next, 0);
+
           const near = hlNearMissText(first, next);
           const line = `🃏 基準カード: **${first}** → **${next}**  ${near}\n✅ 正解！ 勝ち分 **${fmt(pending)}S**（連勝補正 +${(bonusRate*100)|0}%）を保留中\n\n**次のラウンド**\n🃏 現在の基準カード: **${next}**\n🂠 次のカード: **?**\n「高い / 低い」を選んでください（**同値は不正解**）`;
-          return respond(interaction, { embeds: [createEmbed("🎯 High & Low 結果", line, Colors.Fuchsia)], components: [rowHL, rowTake] });
+          return respond(interaction, { embeds: [createEmbed("🎯 High & Low 結果", line, Colors.Fuchsia)], components: [rowCluster] });
         } else {
           await streakLose(uid);
           const line = `🃏 基準カード: **${first}**\n🂠 次のカード: **${next}**  ${hlNearMissText(first,next)}\n❌ 不正解… **-${fmt(bet)}S**\n（**同値は不正解**）`;
@@ -1414,11 +1436,10 @@ client.on("interactionCreate", async (interaction) => {
         const pending = Number(pendingStr);
         const step = Number(stepStr || 0);
         if (Number(sess.stake) !== pending || Number(sess.step) !== step) {
-          // 古いボタン：現在セッションで再構築
+          // 古いボタン：現在セッションで再構築（1行UI）
           const curFirst = Number(sess.meta?.hl?.card) || randInt(1,13);
-          const rowHL = buildHLGuessRow("du_hl_guess", Number(sess.stake), curFirst, String(sess.step||0));
-          const rowTake = buildDUTakeRow(uid, Number(sess.stake), Number(sess.step), "HL");
-          return respond(interaction, { embeds: [createEmbed("♠️ Double Up", "ボタンが古いため更新しました。")], components: [rowHL, rowTake] });
+          const rowCluster = buildDUClusterRowHL(uid, Number(sess.stake), curFirst, Number(sess.step||0));
+          return respond(interaction, { embeds: [createEmbed("♠️ Double Up", "ボタンが古いため更新しました。")], components: [rowCluster] });
         }
 
         // ✅ 信用しない: DB記録の基準カードを使用
@@ -1438,10 +1459,14 @@ client.on("interactionCreate", async (interaction) => {
           }
           // 次ラウンドの基準カードとして next を保存
           await duSave(uid, nextStake, nextStep, { hl: { card: next } });
+          // 旧2行（保持）
           const rowHL = buildHLGuessRow("du_hl_guess", nextStake, next, String(nextStep));
           const rowTake = buildDUTakeRow(uid, nextStake, nextStep, "HL");
+          // 新1行表示
+          const rowCluster = buildDUClusterRowHL(uid, nextStake, next, nextStep);
+
           const line = `🃏 基準カード: **${first}** → **${next}**  ${hlNearMissText(first,next)}\n✅ 成功！ 現在の勝ち分：**${fmt(nextStake)}S**（${nextStep}/${DOUBLEUP_MAX_STEPS}）\n\n**次のラウンド**\n🃏 現在の基準カード: **${next}**\n🂠 次のカード: **?**（**同値は不正解**）`;
-          return respond(interaction, { embeds: [createEmbed("♠️ Double Up", line, Colors.Gold)], components: [rowHL, rowTake] });
+          return respond(interaction, { embeds: [createEmbed("♠️ Double Up", line, Colors.Gold)], components: [rowCluster] });
         } else {
           await duClear(uid);
           await streakLose(uid);
