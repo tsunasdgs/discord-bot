@@ -1,6 +1,7 @@
 // ==============================
 // index.mjs  — TeamSDG's Bot (Full, drop-in)
 // 互換維持 + ①〜⑦すべて実装 + 自動マイグレーション
+// + iOS/ウマ券系 修正 & サーバー権威化
 // ==============================
 
 import {
@@ -159,7 +160,7 @@ function getJSTWeekBounds(date = new Date()) {
   const now = new Date(date);
   const jstMs = now.getTime() + 9*3600*1000;           // JSTに寄せる
   const j = new Date(jstMs);
-  const dow = j.getUTCDay();                           // 0:Sun..6:Sat  ← JST化後のUTCDayでOK
+  const dow = j.getUTCDay();                           // 0:Sun..6:Sat
   const deltaDays = (dow + 6) % 7;                     // 月曜起点
   const jstWeekStartUTCms = Date.UTC(j.getUTCFullYear(), j.getUTCMonth(), j.getUTCDate(), 0,0,0) - deltaDays*86400*1000;
   const startUTC = new Date(jstWeekStartUTCms - 9*3600*1000); // JST 00:00 → UTC
@@ -170,7 +171,6 @@ function getJSTWeekBounds(date = new Date()) {
 // 週繰越用のキー（JST週の開始日ISO）
 function jstWeekStartKey(d = new Date()){
   const { startUTC } = getJSTWeekBounds(d);
-  // 表示用にJST日付に戻す
   const parts = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Tokyo", year: "numeric", month: "2-digit", day: "2-digit" })
     .formatToParts(new Date(startUTC.getTime()+9*3600*1000));
   const get=(t)=>parts.find(p=>p.type===t)?.value??"";
@@ -183,6 +183,30 @@ function signToken(payloadStr){
 }
 function verifyToken(payloadStr, sig){
   try{ return signToken(payloadStr) === sig; }catch{ return false; }
+}
+
+// 全角→半角（数字・英A-F・記号の一部）
+function toHalfWidth(str){
+  if (!str) return "";
+  return str.replace(/[！-～]/g, s => String.fromCharCode(s.charCodeAt(0) - 0xFEE0))
+            .replace(/　/g, " ");
+}
+// 金額などの数値入力を正規化（全角数字→半角、桁区切り削除、切り捨て、NaN→fallback）
+function normalizeInt(input, fallback = 0){
+  if (typeof input !== "string") return Number.isFinite(input) ? Math.trunc(input) : fallback;
+  let s = toHalfWidth(input).replace(/[,_\s，．。]/g, "").trim();
+  // 先頭の+/-のみ許可
+  const m = s.match(/^[+-]?\d+/);
+  if (!m) return fallback;
+  const n = Math.trunc(Number(m[0]));
+  return Number.isFinite(n) ? n : fallback;
+}
+// カラーコード正規化（#RRGGBB）全角#英数対応・不正時は #FFD700
+function normalizeHexColor(input, def = "#FFD700"){
+  let s = toHalfWidth((input||"").trim());
+  s = s.replace(/^#?([0-9a-fA-F]{6}).*$/,"#$1");
+  if (!/^#[0-9a-fA-F]{6}$/.test(s)) return def;
+  return s.toUpperCase();
 }
 
 // Coin
@@ -253,7 +277,6 @@ async function computeWeeklyGrant(uid, want) {
   const earned = await weeklyEarnedJST(uid);
   const remain = Math.max(0, WEEKLY_EARNINGS_LIMIT - earned);
   if (remain <= 0) {
-    // 超過すべてをcarry or discard
     if (WEEKLY_POLICY === "carry" && want > 0) {
       const nextKey = jstWeekStartKey(new Date(Date.now() + 7*86400*1000)); // 翌週キー
       await pool.query(
@@ -375,6 +398,8 @@ async function ensureTables() {
       updated_at TIMESTAMP DEFAULT now()
     );
   `);
+  // ✅ iOS対策：meta JSONB（冪等）
+  await pool.query(`ALTER TABLE casino_sessions ADD COLUMN IF NOT EXISTS meta JSONB DEFAULT '{}'::jsonb;`);
 
   // ガチャJP
   await pool.query(`
@@ -407,6 +432,8 @@ async function ensureTables() {
       updated_at TIMESTAMP DEFAULT now()
     );
   `);
+  // stale UI対策：セッションID
+  await pool.query(`ALTER TABLE casino_mines_sessions ADD COLUMN IF NOT EXISTS session_id TEXT;`);
 
   // Crash
   await pool.query(`
@@ -420,6 +447,7 @@ async function ensureTables() {
       updated_at TIMESTAMP DEFAULT now()
     );
   `);
+  await pool.query(`ALTER TABLE casino_crash_sessions ADD COLUMN IF NOT EXISTS session_id TEXT;`);
 
   // ストリーク
   await pool.query(`
@@ -602,21 +630,27 @@ async function jpTryHitSSR(userId, guild) {
 }
 
 // ==============================
-// DU（汎用）
+// DU（汎用：iOS対策 meta 付き）
 // ==============================
-async function duStart(userId, pendingWin, gameLabel) {
+async function duStart(userId, pendingWin, gameLabel, meta = {}) {
   await pool.query(`
-    INSERT INTO casino_sessions(user_id, game, stake, step, updated_at)
-    VALUES ($1, $2, $3, 0, NOW())
-    ON CONFLICT (user_id) DO UPDATE SET game=$2, stake=$3, step=0, updated_at=NOW()
-  `, [userId, `DU_${gameLabel}`, pendingWin]);
+    INSERT INTO casino_sessions(user_id, game, stake, step, meta, updated_at)
+    VALUES ($1, $2, $3, 0, $4::jsonb, NOW())
+    ON CONFLICT (user_id) DO UPDATE SET game=$2, stake=$3, step=0, meta=$4::jsonb, updated_at=NOW()
+  `, [userId, `DU_${gameLabel}`, pendingWin, JSON.stringify(meta || {})]);
 }
 async function duGet(userId) {
-  const r = await pool.query(`SELECT game, stake, step FROM casino_sessions WHERE user_id=$1`, [userId]);
-  return r.rowCount ? r.rows[0] : null;
+  const r = await pool.query(`SELECT game, stake, step, COALESCE(meta,'{}'::jsonb) AS meta FROM casino_sessions WHERE user_id=$1`, [userId]);
+  return r.rowCount ? { ...r.rows[0], meta: r.rows[0].meta || {} } : null;
 }
-async function duSave(userId, stake, step) {
-  await pool.query(`UPDATE casino_sessions SET stake=$2, step=$3, updated_at=NOW() WHERE user_id=$1`, [userId, stake, step]);
+async function duSave(userId, stake, step, meta = null) {
+  if (meta) {
+    await pool.query(`UPDATE casino_sessions SET stake=$2, step=$3, meta=$4::jsonb, updated_at=NOW() WHERE user_id=$1`,
+      [userId, stake, step, JSON.stringify(meta)]);
+  } else {
+    await pool.query(`UPDATE casino_sessions SET stake=$2, step=$3, updated_at=NOW() WHERE user_id=$1`,
+      [userId, stake, step]);
+  }
 }
 async function duClear(userId) {
   await pool.query(`DELETE FROM casino_sessions WHERE user_id=$1`, [userId]);
@@ -631,7 +665,7 @@ async function runShowyEffect(interaction, title, lines){
     `🕹️ **${title}**\n${lines}\n\n🎞️ ぐるぐる…`,
     `🕹️ **${title}**\n${lines}\n\n🔔 ドキドキ…`,
   ];
-  await respond(interaction, { embeds:[createEmbed(title, frames[0], Colors.Blurple)] }, { ephemeral:true, noUpdate:true });
+  await respond(interaction, { embeds:[createEmbed(title, frames[0], Colors.Blurple)] }, { ephemeral:true, noUpdate:false });
   for (let i=1;i<frames.length;i++){
     await new Promise(r=>setTimeout(r, 500));
     await interaction.editReply({ embeds:[createEmbed(title, frames[i], Colors.Blurple)] }).catch(()=>{});
@@ -758,7 +792,7 @@ async function resolveUIChannel(type, interaction) {
 }
 
 // ==============================
-// Mines：内部
+// Mines：内部（stale UI対策：sessionIdを署名に含める）
 // ==============================
 const bitHas = (mask, idx) => ((mask >> idx) & 1) === 1;
 const bitSet = (mask, idx) => (mask | (1 << idx));
@@ -783,6 +817,7 @@ function minesMultiplier(bombs, openedCount, penalty = 1.0) {
 }
 function minesGridRows(session, locked = false, revealAll = false) {
   const rows = [];
+  const sid = session.session_id || "s";
   for (let r=0;r<3;r++){
     const row = new ActionRowBuilder();
     for (let c=0;c<5;c++){
@@ -792,11 +827,11 @@ function minesGridRows(session, locked = false, revealAll = false) {
       let label = "❓";
       if (revealAll && isBomb) label = "💥";
       else if (opened) label = "✅";
-      const payload = `${session.user_id || "u"}:${idx}`;
+      const payload = `${session.user_id || "u"}:${sid}:${idx}`;
       const sig = signToken(payload);
       row.addComponents(
         new ButtonBuilder()
-          .setCustomId(`mines_open:${idx}:${sig}`)
+          .setCustomId(`mines_open:${sid}:${idx}:${sig}`)
           .setLabel(label)
           .setStyle(opened ? ButtonStyle.Secondary : ButtonStyle.Primary)
           .setDisabled(locked || opened)
@@ -806,15 +841,15 @@ function minesGridRows(session, locked = false, revealAll = false) {
   }
   const mult = minesMultiplier(session.bombs, bitCount(session.opened_mask), Number(session.penalty || 1.0));
   const control = new ActionRowBuilder();
-  const pSig = signToken(`${session.user_id || "u"}:cash`);
+  const pSig = signToken(`${session.user_id || "u"}:${sid}:cash`);
   control.addComponents(
-    new ButtonBuilder().setCustomId(`mines_cash:${pSig}`)
+    new ButtonBuilder().setCustomId(`mines_cash:${sid}:${pSig}`)
       .setLabel(`✅ 確定（×${mult.toFixed(2)}）`).setStyle(ButtonStyle.Success)
       .setDisabled(locked)
   );
-  const peekSig = signToken(`${session.user_id || "u"}:peek`);
+  const peekSig = signToken(`${session.user_id || "u"}:${sid}:peek`);
   control.addComponents(
-    new ButtonBuilder().setCustomId(`mines_peek:${peekSig}`)
+    new ButtonBuilder().setCustomId(`mines_peek:${sid}:${peekSig}`)
       .setLabel("👁️ ちら見（倍率-10%）").setStyle(ButtonStyle.Secondary)
       .setDisabled(locked || !session.can_peek)
   );
@@ -823,7 +858,7 @@ function minesGridRows(session, locked = false, revealAll = false) {
 }
 
 // ==============================
-// Crash：内部
+// Crash：内部（stale UI対策：sessionId）
 // ==============================
 function genCrashTarget() {
   const r = Math.random();
@@ -835,6 +870,7 @@ function crashMultipleSince(startedAt) {
   return Number(Math.max(1.0, (1 + t * CRASH_SPEED_PER_SEC)).toFixed(2));
 }
 const crashTimers = new Map();
+
 // ==============================
 // Gacha 本体（②） & ゲーム群
 // ==============================
@@ -893,25 +929,29 @@ async function startMines(interaction, bet, bombs) {
   const uid = interaction.user.id;
   await addCoins(uid, -bet, "casino_mines", `BET start bombs:${bombs}`);
   const bombs_mask = randomBombMask(bombs);
+  const sessionId = crypto.randomBytes(8).toString("hex");
   await pool.query(`
-    INSERT INTO casino_mines_sessions(user_id, bet, bombs, bombs_mask, opened_mask, can_peek, penalty, created_at, updated_at)
-    VALUES ($1,$2,$3,$4,0,true,1.0,NOW(),NOW())
-    ON CONFLICT (user_id) DO UPDATE SET bet=$2, bombs=$3, bombs_mask=$4, opened_mask=0, can_peek=true, penalty=1.0, updated_at=NOW()
-  `, [uid, bet, bombs, bombs_mask]);
+    INSERT INTO casino_mines_sessions(user_id, bet, bombs, bombs_mask, opened_mask, can_peek, penalty, session_id, created_at, updated_at)
+    VALUES ($1,$2,$3,$4,0,true,1.0,$5,NOW(),NOW())
+    ON CONFLICT (user_id) DO UPDATE SET bet=$2, bombs=$3, bombs_mask=$4, opened_mask=0, can_peek=true, penalty=1.0, session_id=$5, updated_at=NOW()
+  `, [uid, bet, bombs, bombs_mask, sessionId]);
 
-  const session = { user_id: uid, bet, bombs, bombs_mask, opened_mask: 0, can_peek: true, penalty: 1.0 };
+  const session = { user_id: uid, bet, bombs, bombs_mask, opened_mask: 0, can_peek: true, penalty: 1.0, session_id: sessionId };
   const rows = minesGridRows(session, false, false);
   const mult = minesMultiplier(bombs, 0, 1.0);
   await respond(interaction, {
     embeds: [createEmbed("💣 Mines", `爆弾 **${bombs}** / マス **${MINES_TOTAL_CELLS}**\n現在倍率：×${mult.toFixed(2)}\n安全マスを開けるか、いつでも「確定」で終了できます。`, Colors.DarkGrey)],
     components: rows
-  }, { ephemeral: true, noUpdate: true });
+  }, { ephemeral: false, noUpdate: false });
 }
-async function handleMinesOpen(interaction, idx) {
+async function handleMinesOpen(interaction, sid, idx) {
   const uid = interaction.user.id;
   const res = await pool.query(`SELECT * FROM casino_mines_sessions WHERE user_id=$1`, [uid]);
   if (!res.rowCount) return ephemeralReply(interaction, { content: "Minesセッションが見つかりません。" });
   const s = res.rows[0];
+  if (s.session_id && s.session_id !== sid) {
+    return ephemeralReply(interaction, { content: "古いUIです。最新の盤面から操作してください。" }, 12000);
+  }
   if (bitHas(s.opened_mask, idx)) {
     return respond(interaction, { components: minesGridRows(s, false, false) });
   }
@@ -929,11 +969,14 @@ async function handleMinesOpen(interaction, idx) {
     components: minesGridRows(session, false, false)
   });
 }
-async function handleMinesCash(interaction) {
+async function handleMinesCash(interaction, sid) {
   const uid = interaction.user.id;
   const res = await pool.query(`SELECT * FROM casino_mines_sessions WHERE user_id=$1`, [uid]);
   if (!res.rowCount) return ephemeralReply(interaction, { content: "Minesセッションが見つかりません。" });
   const s = res.rows[0];
+  if (s.session_id && s.session_id !== sid) {
+    return ephemeralReply(interaction, { content: "古いUIです。最新の盤面から操作してください。" }, 12000);
+  }
   const opened = bitCount(s.opened_mask);
   const mult = minesMultiplier(s.bombs, opened, Number(s.penalty || 1.0));
   const pay = Math.floor(s.bet * mult);
@@ -941,11 +984,14 @@ async function handleMinesCash(interaction) {
   await pool.query(`DELETE FROM casino_mines_sessions WHERE user_id=$1`, [uid]);
   return respond(interaction, { embeds: [createEmbed("💣 Mines", `✅ 確定 **+${fmt(pay)}S**（×${mult.toFixed(2)}）`, Colors.Green)], components: [] });
 }
-async function handleMinesPeek(interaction) {
+async function handleMinesPeek(interaction, sid) {
   const uid = interaction.user.id;
   const res = await pool.query(`SELECT * FROM casino_mines_sessions WHERE user_id=$1`, [uid]);
   if (!res.rowCount) return ephemeralReply(interaction, { content: "Minesセッションが見つかりません。" });
   const s = res.rows[0];
+  if (s.session_id && s.session_id !== sid) {
+    return ephemeralReply(interaction, { content: "古いUIです。最新の盤面から操作してください。" }, 12000);
+  }
   if (!s.can_peek) return respond(interaction, { components: minesGridRows(s, false, false) });
 
   const safeCandidates = [];
@@ -972,20 +1018,21 @@ async function handleMinesPeek(interaction) {
 async function startCrash(interaction, bet) {
   const uid = interaction.user.id;
   const target = genCrashTarget();
+  const sessionId = crypto.randomBytes(8).toString("hex");
   await addCoins(uid, -bet, "casino_crash", `BET start target:${target}x`);
   await pool.query(`
-    INSERT INTO casino_crash_sessions(user_id, bet, started_at, target_crash, cashed_at, created_at, updated_at)
-    VALUES ($1,$2,NOW(),$3,NULL,NOW(),NOW())
-    ON CONFLICT (user_id) DO UPDATE SET bet=$2, started_at=NOW(), target_crash=$3, cashed_at=NULL, updated_at=NOW()
-  `, [uid, bet, target]);
+    INSERT INTO casino_crash_sessions(user_id, bet, started_at, target_crash, cashed_at, session_id, created_at, updated_at)
+    VALUES ($1,$2,NOW(),$3,NULL,$4,NOW(),NOW())
+    ON CONFLICT (user_id) DO UPDATE SET bet=$2, started_at=NOW(), target_crash=$3, cashed_at=NULL, session_id=$4, updated_at=NOW()
+  `, [uid, bet, target, sessionId]);
 
-  const sig = signToken(`${uid}:cash`);
+  const sig = signToken(`${uid}:${sessionId}:cash`);
   await respond(interaction, {
     embeds: [createEmbed("📈 Crash", `倍率が上昇します。**クラッシュ前**に「確定」を押すと、その倍率で払い戻し！\n開始直後の即クラッシュは起きにくい設定です（調整可）。`, Colors.Green)],
     components: [ new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId(`crash_cash:${sig}`).setLabel("✅ 確定").setStyle(ButtonStyle.Success)
+      new ButtonBuilder().setCustomId(`crash_cash:${sessionId}:${sig}`).setLabel("✅ 確定").setStyle(ButtonStyle.Success)
     ) ]
-  }, { ephemeral: true, noUpdate: true });
+  }, { ephemeral: false, noUpdate: false });
 
   const tick = async () => {
     try {
@@ -1014,11 +1061,14 @@ async function startCrash(interaction, bet) {
   const h = setInterval(tick, Math.max(300, CRASH_TICK_MS|0));
   crashTimers.set(uid, h);
 }
-async function handleCrashCash(interaction) {
+async function handleCrashCash(interaction, sid) {
   const uid = interaction.user.id;
-  const r = await pool.query(`SELECT bet, started_at, target_crash, cashed_at FROM casino_crash_sessions WHERE user_id=$1`, [uid]);
+  const r = await pool.query(`SELECT bet, started_at, target_crash, cashed_at, session_id FROM casino_crash_sessions WHERE user_id=$1`, [uid]);
   if (!r.rowCount) return ephemeralReply(interaction, { content: "Crashセッションが見つかりません。" });
   const s = r.rows[0];
+  if (s.session_id && s.session_id !== sid) {
+    return ephemeralReply(interaction, { content: "古いUIです。最新のゲームから操作してください。" }, 12000);
+  }
   const nowX = crashMultipleSince(s.started_at);
   const tsec = (Date.now() - new Date(s.started_at).getTime()) / 1000;
 
@@ -1059,28 +1109,49 @@ function buildDUTakeRow(uid, stake, step, gameLabel) {
 }
 
 // ==============================
-// 返信系ヘルパ
+// 返信系ヘルパ（iOS二重エフェメラル防止）
 // ==============================
+// ❗ボタン/セレクト時：update() → editReply() → deferUpdate()。新規reply()はしない
 async function respond(interaction, payload, { ephemeral = false, noUpdate = false } = {}) {
   const data = { ...payload };
   if (typeof data.content === "string") data.content = limitContent(data.content);
   try {
-    if (!noUpdate && (interaction.isButton?.() || interaction.isStringSelectMenu?.())) {
-      try { return await interaction.update(data); } catch (_) {}
+    if ((interaction.isButton?.() || interaction.isStringSelectMenu?.())) {
+      if (!noUpdate) {
+        try { return await interaction.update(data); } catch (_) {}
+      }
+      if (interaction.deferred || interaction.replied) {
+        try { return await interaction.editReply(data); } catch (_) {}
+      }
+      try { return await interaction.deferUpdate(); } catch {}
+      return;
+    } else {
+      if (interaction.deferred || interaction.replied) {
+        try { return await interaction.editReply(data); } catch (_) {}
+      }
+      try { return await interaction.reply({ ...data, ephemeral }); } catch (_) {}
+      return await interaction.followUp({ ...data, ephemeral: true });
     }
-    if (interaction.deferred || interaction.replied) {
-      try { return await interaction.editReply(data); } catch (_) {}
-    }
-    try { return await interaction.reply({ ...data, ephemeral }); } catch (_) {}
-    return await interaction.followUp({ ...data, ephemeral: true });
   } catch (e) {
     logError("respond() failed:", e);
     try { return await interaction.deferUpdate(); } catch {}
   }
 }
+// エフェメラル専用：必要時のみ使う
 async function ephemeralReply(interaction, payload, ms = 15000) {
-  const msg = await respond(interaction, payload, { ephemeral: true, noUpdate: true });
-  setTimeout(() => interaction.deleteReply?.().catch(() => {}), ms);
+  let msg;
+  try {
+    if (interaction.deferred || interaction.replied) {
+      msg = await interaction.followUp({ ...payload, ephemeral: true });
+    } else {
+      msg = await interaction.reply({ ...payload, ephemeral: true });
+    }
+  } catch {
+    try { await interaction.deferUpdate(); } catch {}
+  }
+  if (msg?.deletable || msg?.ephemeral) {
+    setTimeout(() => interaction.deleteReply?.().catch(() => {}), ms);
+  }
   return msg;
 }
 
@@ -1114,17 +1185,17 @@ client.on("interactionCreate", async (interaction) => {
       if (name === "ui") {
         const type = interaction.options.getString("type", true);
         const targetCh = await resolveUIChannel(type, interaction);
-        await respond(interaction, { content: `UI再表示：**${type}** → <#${targetCh.id}> に投稿します。` }, { ephemeral: true, noUpdate: true });
+        await respond(interaction, { content: `UI再表示：**${type}** → <#${targetCh.id}> に投稿します。` }, { ephemeral: true, noUpdate: false });
         await sendUI(targetCh, type);
         return;
       }
       if (name === "jackpot") {
         const pot = await getJackpotPot();
-        return respond(interaction, { embeds: [createEmbed("🧨 Jackpot 現在高", `現在ポット：**${fmt(pot)}S**`)] }, { ephemeral: true, noUpdate: true });
+        return respond(interaction, { embeds: [createEmbed("🧨 Jackpot 現在高", `現在ポット：**${fmt(pot)}S**`)] }, { ephemeral: true, noUpdate: false });
       }
       if (name === "balance") {
         const bal = await getBalance(interaction.user.id);
-        return respond(interaction, { embeds: [createEmbed("残高確認", `${fmt(bal)} S`)] }, { ephemeral: true, noUpdate: true });
+        return respond(interaction, { embeds: [createEmbed("残高確認", `${fmt(bal)} S`)] }, { ephemeral: true, noUpdate: false });
       }
       if (name === "gacha_ev") {
         const conf = currentGachaConfig();
@@ -1139,7 +1210,7 @@ client.on("interactionCreate", async (interaction) => {
           `JPテイク率：${(GACHA_JP_TAKE_RATE*100).toFixed(0)}%（総EVは中立扱い）`,
           `目安：基礎EVは**80〜90%**に収まる想定`
         ].join("\n");
-        return respond(interaction, { embeds: [createEmbed("🎲 ガチャEV", text, Colors.Gold)] }, { ephemeral: true, noUpdate: true });
+        return respond(interaction, { embeds: [createEmbed("🎲 ガチャEV", text, Colors.Gold)] }, { ephemeral: true, noUpdate: false });
       }
     }
 
@@ -1154,7 +1225,7 @@ client.on("interactionCreate", async (interaction) => {
           .setTitle("ユーザーコイン調整")
           .addComponents(
             new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId("target_user").setLabel("対象ユーザーID").setStyle(TextInputStyle.Short).setRequired(true)),
-            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId("amount").setLabel("増減額 (例: 100 or -50)").setStyle(TextInputStyle.Short).setRequired(true))
+            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId("amount").setLabel("増減額 (例: １００ or -５０)").setStyle(TextInputStyle.Short).setRequired(true))
           );
         return interaction.showModal(modal);
       }
@@ -1252,7 +1323,7 @@ client.on("interactionCreate", async (interaction) => {
           .setTitle("🎊 SSRおめでとう！記念ロール作成")
           .addComponents(
             new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId("role_name").setLabel("ロール名（20文字まで）").setStyle(TextInputStyle.Short).setMaxLength(20).setRequired(true)),
-            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId("role_color").setLabel("カラー（例：#FFD700）").setStyle(TextInputStyle.Short).setRequired(false))
+            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId("role_color").setLabel("カラー（例：#ＦＦＤ７００ など全角可）").setStyle(TextInputStyle.Short).setRequired(false))
           );
         return interaction.showModal(modal);
       }
@@ -1315,7 +1386,8 @@ client.on("interactionCreate", async (interaction) => {
           const s = await streakWin(uid);
           const bonusRate = Math.min(s.current, CASINO_STREAK_MAX) * 0.05; // 1連勝ごと+5%
           const pending = Math.floor(bet * HL_BASE_MULT * (1 + bonusRate)); // ③ 調整
-          await duStart(uid, pending, "HL");
+          // ✅ HL勝利 → DU開始時に meta.hl.card = next を保存（サーバー権威）
+          await duStart(uid, pending, "HL", { hl: { card: next } });
 
           const rowHL = buildHLGuessRow("du_hl_guess", pending, next, "0");
           const rowTake = buildDUTakeRow(uid, pending, 0, "HL");
@@ -1330,9 +1402,9 @@ client.on("interactionCreate", async (interaction) => {
         }
       }
 
-      // ===== ダブルアップHL：推測 =====
+      // ===== ダブルアップHL：推測（サーバー権威：DBの meta.hl.card を基準に判定） =====
       if (interaction.customId.startsWith("du_hl_guess:")) {
-        const [, guess, pendingStr, firstStr, stepStr] = interaction.customId.split(":");
+        const [, guess, pendingStr, _firstStrFromBtn, stepStr] = interaction.customId.split(":");
         const uid = interaction.user.id;
         const sess = await duGet(uid);
         if (!sess || !String(sess.game).startsWith("DU_HL")) {
@@ -1340,14 +1412,17 @@ client.on("interactionCreate", async (interaction) => {
         }
 
         const pending = Number(pendingStr);
-        const step = Number(stepStr);
+        const step = Number(stepStr || 0);
         if (Number(sess.stake) !== pending || Number(sess.step) !== step) {
-          const rowHL = buildHLGuessRow("du_hl_guess", Number(sess.stake), randInt(1,13), String(sess.step||0));
+          // 古いボタン：現在セッションで再構築
+          const curFirst = Number(sess.meta?.hl?.card) || randInt(1,13);
+          const rowHL = buildHLGuessRow("du_hl_guess", Number(sess.stake), curFirst, String(sess.step||0));
           const rowTake = buildDUTakeRow(uid, Number(sess.stake), Number(sess.step), "HL");
           return respond(interaction, { embeds: [createEmbed("♠️ Double Up", "ボタンが古いため更新しました。")], components: [rowHL, rowTake] });
         }
 
-        const first = parseInt(firstStr, 10);
+        // ✅ 信用しない: DB記録の基準カードを使用
+        const first = Number(sess.meta?.hl?.card) || randInt(1,13);
         const next  = randInt(1, 13);
         const isHigh = next > first;
         const isLow  = next < first;
@@ -1361,7 +1436,8 @@ client.on("interactionCreate", async (interaction) => {
             await duClear(uid);
             return respond(interaction, { embeds: [createEmbed("♠️ Double Up", `✅ 最大回数に達したため自動確定：**+${fmt(nextStake)}S**`, Colors.Gold)], components: [] });
           }
-          await duSave(uid, nextStake, nextStep);
+          // 次ラウンドの基準カードとして next を保存
+          await duSave(uid, nextStake, nextStep, { hl: { card: next } });
           const rowHL = buildHLGuessRow("du_hl_guess", nextStake, next, String(nextStep));
           const rowTake = buildDUTakeRow(uid, nextStake, nextStep, "HL");
           const line = `🃏 基準カード: **${first}** → **${next}**  ${hlNearMissText(first,next)}\n✅ 成功！ 現在の勝ち分：**${fmt(nextStake)}S**（${nextStep}/${DOUBLEUP_MAX_STEPS}）\n\n**次のラウンド**\n🃏 現在の基準カード: **${next}**\n🂠 次のカード: **?**（**同値は不正解**）`;
@@ -1389,31 +1465,31 @@ client.on("interactionCreate", async (interaction) => {
 
       // Minesボタン
       if (interaction.customId.startsWith("mines_open:")) {
-        const [, idxStr, sig] = interaction.customId.split(":");
+        const [, sid, idxStr, sig] = interaction.customId.split(":");
         const idx = parseInt(idxStr, 10);
-        const payload = `${interaction.user.id}:${idx}`;
+        const payload = `${interaction.user.id}:${sid}:${idx}`;
         if (!verifyToken(payload, sig)) return ephemeralReply(interaction, { content: "検証に失敗しました。" }, 8000);
-        return handleMinesOpen(interaction, idx);
+        return handleMinesOpen(interaction, sid, idx);
       }
       if (interaction.customId.startsWith("mines_cash:")) {
-        const [, sig] = interaction.customId.split(":");
-        const payload = `${interaction.user.id}:cash`;
+        const [, sid, sig] = interaction.customId.split(":");
+        const payload = `${interaction.user.id}:${sid}:cash`;
         if (!verifyToken(payload, sig)) return ephemeralReply(interaction, { content: "検証に失敗しました。" }, 8000);
-        return handleMinesCash(interaction);
+        return handleMinesCash(interaction, sid);
       }
       if (interaction.customId.startsWith("mines_peek:")) {
-        const [, sig] = interaction.customId.split(":");
-        const payload = `${interaction.user.id}:peek`;
+        const [, sid, sig] = interaction.customId.split(":");
+        const payload = `${interaction.user.id}:${sid}:peek`;
         if (!verifyToken(payload, sig)) return ephemeralReply(interaction, { content: "検証に失敗しました。" }, 8000);
-        return handleMinesPeek(interaction);
+        return handleMinesPeek(interaction, sid);
       }
 
       // Crashボタン
       if (interaction.customId.startsWith("crash_cash:")) {
-        const [, sig] = interaction.customId.split(":");
-        const payload = `${interaction.user.id}:cash`;
+        const [, sid, sig] = interaction.customId.split(":");
+        const payload = `${interaction.user.id}:${sid}:cash`;
         if (!verifyToken(payload, sig)) return ephemeralReply(interaction, { content: "検証に失敗しました。" }, 8000);
-        return handleCrashCash(interaction);
+        return handleCrashCash(interaction, sid);
       }
 
       // ルムマ：UI系ボタン
@@ -1589,18 +1665,25 @@ client.on("interactionCreate", async (interaction) => {
         return ephemeralReply(interaction, { embeds: [createEmbed("💳 払い戻し", `合計 **+${fmt(total)}S** を受け取りました。`, Colors.Gold)] });
       }
 
-      // 金額入力へ（選択式）
+      // ====== ウマ券 金額入力へ（馬名→index受け渡し短縮） ======
       if (interaction.customId.startsWith("rumuma_bet_amount_go:")) {
-        const [, raceIdStr, horseEnc, sig] = interaction.customId.split(":");
-        const payload = `${raceIdStr}:${horseEnc}`;
+        const [, raceIdStr, idxStr, sig] = interaction.customId.split(":");
+        const payload = `${raceIdStr}:${idxStr}`;
         if (!verifyToken(payload, sig)) return ephemeralReply(interaction, { content: "検証に失敗しました。" }, 8000);
+
         const raceId = parseInt(raceIdStr, 10);
-        const horse = decodeURIComponent(horseEnc);
+        const rr = await pool.query(`SELECT horses FROM rumuma_races WHERE id=$1`, [raceId]);
+        if (!rr.rowCount) return ephemeralReply(interaction, { content: "レースが見つかりません。" });
+        const horses = rr.rows[0].horses || [];
+        const idx = parseInt(idxStr, 10);
+        const horse = horses[idx];
+        if (!horse) return ephemeralReply(interaction, { content: "選択された馬が不正です。" });
+
         const modal = new ModalBuilder()
-          .setCustomId(`rumuma_bet_amount_modal:${raceId}:${encodeURIComponent(horse)}`)
+          .setCustomId(`rumuma_bet_amount_modal:${raceId}:${idx}`)
           .setTitle(`購入金額 / ${horse}`)
           .addComponents(
-            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId("amount").setLabel("ベット額").setStyle(TextInputStyle.Short).setRequired(true))
+            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId("amount").setLabel("ベット額（全角数字OK）").setStyle(TextInputStyle.Short).setRequired(true))
           );
         return interaction.showModal(modal);
       }
@@ -1613,7 +1696,7 @@ client.on("interactionCreate", async (interaction) => {
       if (interaction.customId === "admin_repost_ui_select") {
         const type = interaction.values?.[0];
         const targetCh = await resolveUIChannel(type, interaction);
-        await respond(interaction, { content: `UI再表示：**${type}** → <#${targetCh.id}> に投稿します。` }, { ephemeral: true });
+        await respond(interaction, { content: `UI再表示：**${type}** → <#${targetCh.id}> に投稿します。` }, { ephemeral:true, noUpdate:false });
         await sendUI(targetCh, type);
         return;
       }
@@ -1621,10 +1704,10 @@ client.on("interactionCreate", async (interaction) => {
         if (!interaction.member?.permissions?.has(PermissionsBitField.Flags.Administrator))
           return ephemeralReply(interaction, { content: "管理者権限が必要です" });
         const v = interaction.values?.[0];
-        if (v !== "yes") return respond(interaction, { content: "キャンセルしました。"}, { ephemeral:true });
+        if (v !== "yes") return respond(interaction, { content: "キャンセルしました。"}, { ephemeral:true, noUpdate:false });
         const ongoing = await pool.query(`SELECT id FROM rumuma_races WHERE finished=false OR winner IS NULL`);
         for (const row of ongoing.rows) { await refundRumuma(row.id, "全リセット"); }
-        return respond(interaction, { embeds: [createEmbed("🧹 レース全リセット", `開催中のレースをすべて中止・返金しました（履歴は保持）。`)] }, { ephemeral:true });
+        return respond(interaction, { embeds: [createEmbed("🧹 レース全リセット", `開催中のレースをすべて中止・返金しました（履歴は保持）。`)] }, { ephemeral:true, noUpdate:false });
       }
       if (interaction.customId === "rumuma_list_filter") {
         const mode = interaction.values?.[0] || "all_desc";
@@ -1649,12 +1732,13 @@ client.on("interactionCreate", async (interaction) => {
         const menu = new StringSelectMenuBuilder()
           .setCustomId(`rumuma_bet_pick_horse:${raceId}`)
           .setPlaceholder(`#${raceId} ${r.rows[0].race_name} の馬を選択`)
-          .addOptions(...horses.map(h => ({ label: h, value: h })).slice(0, 25));
+          // ✅ value は index にする（0..）
+          .addOptions(...horses.map((h, i) => ({ label: h, value: String(i) })).slice(0, 25));
         return respond(interaction, { content: "馬を選択してください。", components: [new ActionRowBuilder().addComponents(menu)] });
       }
       if (interaction.customId.startsWith("rumuma_bet_pick_horse:")) {
         const raceId = parseInt(interaction.customId.split(":")[1], 10);
-        const horse = interaction.values?.[0];
+        const idx = parseInt(interaction.values?.[0], 10);
 
         const rr = await pool.query(`
           SELECT r.id, r.race_name, r.horses,
@@ -1664,7 +1748,9 @@ client.on("interactionCreate", async (interaction) => {
         if (!rr.rowCount) return respond(interaction, { content: "レースが見つかりません。" });
 
         const race = rr.rows[0];
-        if (!race.horses.includes(horse)) return respond(interaction, { content: "馬名が出走一覧にありません。" });
+        const horses = race.horses || [];
+        const horse = horses[idx];
+        if (!horse) return respond(interaction, { content: "馬が見つかりません。" });
 
         const br = await pool.query(`SELECT horse, SUM(amount) AS amt FROM rumuma_bets WHERE race_id=$1 GROUP BY horse`, [raceId]);
         const totals = Object.fromEntries(br.rows.map(x => [x.horse, Number(x.amt)]));
@@ -1677,9 +1763,9 @@ client.on("interactionCreate", async (interaction) => {
         const after100_mult   = `${(after100_total/after100_horse).toFixed(2)}x`;
         const after100_payout = Math.floor(after100_total/after100_horse * 100);
 
-        const goSig = signToken(`${raceId}:${encodeURIComponent(horse)}`);
+        const goSig = signToken(`${raceId}:${idx}`);
         const goRow = new ActionRowBuilder().addComponents(
-          new ButtonBuilder().setCustomId(`rumuma_bet_amount_go:${raceId}:${encodeURIComponent(horse)}:${goSig}`).setLabel("📝 ベット入力へ").setStyle(ButtonStyle.Primary),
+          new ButtonBuilder().setCustomId(`rumuma_bet_amount_go:${raceId}:${idx}:${goSig}`).setLabel("📝 ベット入力へ").setStyle(ButtonStyle.Primary),
         );
 
         const text = [
@@ -1760,20 +1846,20 @@ client.on("interactionCreate", async (interaction) => {
 
     // ===== Modal =====
     if (interaction.type === InteractionType.ModalSubmit) {
-      // 管理：コイン調整
+      // 管理：コイン調整（全角対応）
       if (interaction.customId === "admin_adjust_modal") {
         const uid = interaction.fields.getTextInputValue("target_user").trim();
-        const amount = parseInt(interaction.fields.getTextInputValue("amount"), 10);
+        const amount = normalizeInt(interaction.fields.getTextInputValue("amount"), NaN);
         if (!Number.isFinite(amount)) return ephemeralReply(interaction, { content: "金額が不正です" });
         await addCoins(uid, amount, "admin_adjust", "管理者操作");
         return ephemeralReply(interaction, { content: `ユーザー:${uid} に ${fmt(amount)} 調整しました` });
       }
 
-      // HL起点
+      // HL起点（全角対応）
       if (interaction.customId === "casino_bet_modal_highlow") {
         const uid = interaction.user.id;
-        const input = interaction.fields.getTextInputValue("bet")?.trim();
-        const req = Math.max(1, parseInt(input, 10) || CASINO_BET_DEFAULT);
+        const input = interaction.fields.getTextInputValue("bet")?.trim() ?? "";
+        const req = Math.max(1, normalizeInt(input, CASINO_BET_DEFAULT));
         const bet = await resolveBet(uid, req);
         const balance = await getBalance(uid);
         if (balance < bet) return ephemeralReply(interaction, { embeds: [createEmbed("High & Low", `残高不足：必要 ${fmt(bet)}S / 保有 ${fmt(balance)}S`, Colors.Red)] }, 20000);
@@ -1787,24 +1873,25 @@ client.on("interactionCreate", async (interaction) => {
         return;
       }
 
-      // Mines起点
+      // Mines起点（全角対応）
       if (interaction.customId === "casino_bet_modal_mines") {
         const uid = interaction.user.id;
-        const betIn = interaction.fields.getTextInputValue("bet")?.trim();
-        const bombsIn = interaction.fields.getTextInputValue("bombs")?.trim();
-        const betReq = Math.max(1, parseInt(betIn || "", 10) || CASINO_BET_DEFAULT);
+        const betIn = interaction.fields.getTextInputValue("bet")?.trim() ?? "";
+        const bombsIn = interaction.fields.getTextInputValue("bombs")?.trim() ?? "";
+        const betReq = Math.max(1, normalizeInt(betIn, CASINO_BET_DEFAULT));
         const bet = await resolveBet(uid, betReq);
         const balance = await getBalance(uid);
         if (balance < bet) return ephemeralReply(interaction, { embeds: [createEmbed("Mines", `残高不足：必要 ${fmt(bet)}S / 保有 ${fmt(balance)}S`, Colors.Red)] }, 20000);
-        let bombs = Math.max(MINES_BOMBS_MIN, Math.min(MINES_BOMBS_MAX, parseInt(bombsIn || "", 10) || 3));
+        let bombs = normalizeInt(bombsIn, 3);
+        bombs = Math.max(MINES_BOMBS_MIN, Math.min(MINES_BOMBS_MAX, bombs));
         return startMines(interaction, bet, bombs);
       }
 
-      // Crash起点
+      // Crash起点（全角対応）
       if (interaction.customId === "casino_bet_modal_crash") {
         const uid = interaction.user.id;
-        const betIn = interaction.fields.getTextInputValue("bet")?.trim();
-        const betReq = Math.max(1, parseInt(betIn || "", 10) || CASINO_BET_DEFAULT);
+        const betIn = interaction.fields.getTextInputValue("bet")?.trim() ?? "";
+        const betReq = Math.max(1, normalizeInt(betIn, CASINO_BET_DEFAULT));
         const bet = await resolveBet(uid, betReq);
         const balance = await getBalance(uid);
         if (balance < bet) return ephemeralReply(interaction, { embeds: [createEmbed("Crash", `残高不足：必要 ${fmt(bet)}S / 保有 ${fmt(balance)}S`, Colors.Red)] }, 20000);
@@ -1825,12 +1912,12 @@ client.on("interactionCreate", async (interaction) => {
         return ephemeralReply(interaction, { embeds: [createEmbed("🏇 レース作成", `#${r.rows[0].id} ${name}\n出走: ${horses.join(", ")}`)] }, 30000);
       }
 
-      // 後方互換：直接入力購入
+      // 後方互換：直接入力購入（全角対応）
       if (interaction.customId === "rumuma_bet_modal") {
         const uid = interaction.user.id;
-        const raceId = parseInt(interaction.fields.getTextInputValue("race_id"), 10);
+        const raceId = normalizeInt(interaction.fields.getTextInputValue("race_id"), NaN);
         const horse = interaction.fields.getTextInputValue("horse").trim();
-        const amt = parseInt(interaction.fields.getTextInputValue("amount"), 10);
+        const amt = normalizeInt(interaction.fields.getTextInputValue("amount"), NaN);
         if (!Number.isFinite(raceId) || !horse || !Number.isFinite(amt) || amt<=0) return ephemeralReply(interaction, { content: "入力が不正です。" });
         const r = await pool.query(`SELECT horses, finished FROM rumuma_races WHERE id=$1`, [raceId]);
         if (!r.rowCount) return ephemeralReply(interaction, { content: "レースが見つかりません。" });
@@ -1843,18 +1930,20 @@ client.on("interactionCreate", async (interaction) => {
         return ephemeralReply(interaction, { embeds: [createEmbed("🎫 ウマ券購入", `#${raceId} / ${horse} に **-${fmt(amt)}S**`)] }, 20000);
       }
 
-      // 選択式→金額モーダル結果
+      // 選択式→金額モーダル結果（全角対応 / index経由で馬復元）
       if (interaction.customId.startsWith("rumuma_bet_amount_modal:")) {
-        const [, raceIdStr, horseEnc] = interaction.customId.split(":");
+        const [, raceIdStr, idxStr] = interaction.customId.split(":");
         const raceId = parseInt(raceIdStr, 10);
-        const horse = decodeURIComponent(horseEnc);
+        const idx = parseInt(idxStr, 10);
         const uid = interaction.user.id;
-        const amt = parseInt(interaction.fields.getTextInputValue("amount"), 10);
+        const amt = normalizeInt(interaction.fields.getTextInputValue("amount"), NaN);
         if (!Number.isFinite(amt) || amt<=0) return ephemeralReply(interaction, { content: "金額が不正です。" });
         const r = await pool.query(`SELECT horses, finished FROM rumuma_races WHERE id=$1`, [raceId]);
         if (!r.rowCount) return ephemeralReply(interaction, { content: "レースが見つかりません。" });
         if (r.rows[0].finished) return ephemeralReply(interaction, { content: "このレースは締め切られています。" });
-        if (!r.rows[0].horses.includes(horse)) return ephemeralReply(interaction, { content: "馬名が一覧にありません。" });
+        const horses = r.rows[0].horses || [];
+        const horse = horses[idx];
+        if (!horse) return ephemeralReply(interaction, { content: "選択された馬が不正です。" });
         const bal = await getBalance(uid);
         if (bal < amt) return ephemeralReply(interaction, { content: `残高不足（必要 ${fmt(amt)}S / 保有 ${fmt(bal)}S）` });
         await addCoins(uid, -amt, "rumuma_bet", `race:${raceId} ${horse}`);
@@ -1911,7 +2000,7 @@ client.on("interactionCreate", async (interaction) => {
         return ephemeralReply(interaction, { embeds: [createEmbed("⛔ 開催中止", `#${raceId} は返金済みです。`)] }, 20000);
       }
 
-      // ガチャ：SSRモーダル（ロール作成＆遅延告知）
+      // ガチャ：SSRモーダル（ロール作成＆遅延告知）色コード正規化
       if (interaction.customId.startsWith("gacha_ssr_modal:")) {
         const [, uid, sig] = interaction.customId.split(":");
         const payload = `${uid}:openmodal`;
@@ -1919,9 +2008,7 @@ client.on("interactionCreate", async (interaction) => {
           return ephemeralReply(interaction, { content: "権限またはトークン検証に失敗しました。" }, 10000);
         }
         const roleName = interaction.fields.getTextInputValue("role_name").trim();
-        let roleColor = interaction.fields.getTextInputValue("role_color").trim();
-        if (roleColor && !/^#?[0-9a-fA-F]{6}$/.test(roleColor)) roleColor = "#FFD700";
-        if (roleColor && !roleColor.startsWith("#")) roleColor = `#${roleColor}`;
+        let roleColor = normalizeHexColor(interaction.fields.getTextInputValue("role_color"), "#FFD700");
 
         try {
           const guild = interaction.guild;
@@ -1952,6 +2039,7 @@ client.on("interactionCreate", async (interaction) => {
     try { await ephemeralReply(interaction, { content: "処理中にエラーが発生しました" }); } catch {}
   }
 });
+
 // ==============================
 // 発言報酬（① 最短文字数/クールダウン/日上限/週上限）
 // ==============================
@@ -2087,3 +2175,5 @@ http.createServer((req, res) => {
 }).listen(PORT, () => {
   logInfo(`🌐 HTTP server running on port ${PORT}`);
 });
+
+// 完全出力完了
