@@ -2,6 +2,7 @@
 // index.mjs  — TeamSDG's Bot (Full, drop-in)
 // 互換維持 + ①〜⑦すべて実装 + 自動マイグレーション
 // + iOS/ウマ券系 修正 & サーバー権威化
+// + UI永続化ガード・Crash/Mines 終了強制反映
 // ==============================
 
 import {
@@ -947,7 +948,16 @@ async function startMines(interaction, bet, bombs) {
 async function handleMinesOpen(interaction, sid, idx) {
   const uid = interaction.user.id;
   const res = await pool.query(`SELECT * FROM casino_mines_sessions WHERE user_id=$1`, [uid]);
-  if (!res.rowCount) return ephemeralReply(interaction, { content: "Minesセッションが見つかりません。" });
+  if (!res.rowCount) {
+    // 終了してるので元メッセージを潰しておく
+    try {
+      await interaction.message?.edit({
+        embeds: [createEmbed("💣 Mines", "このゲームは終了しています。最新のメニューからもう一度開始してください。", Colors.Red)],
+        components: []
+      });
+    } catch {}
+    return ephemeralReply(interaction, { content: "Minesセッションが見つかりません。" });
+  }
   const s = res.rows[0];
   if (s.session_id && s.session_id !== sid) {
     return ephemeralReply(interaction, { content: "古いUIです。最新の盤面から操作してください。" }, 12000);
@@ -956,9 +966,13 @@ async function handleMinesOpen(interaction, sid, idx) {
     return respond(interaction, { components: minesGridRows(s, false, false) });
   }
   if (bitHas(s.bombs_mask, idx)) {
+    // 爆発 → セッション削除して盤面表示を固定
     const reveal = minesGridRows(s, true, true);
     await pool.query(`DELETE FROM casino_mines_sessions WHERE user_id=$1`, [uid]);
-    return respond(interaction, { embeds: [createEmbed("💣 Mines", `💥 **爆発！** ベットは没収されました。`, Colors.Red)], components: reveal });
+    return respond(interaction, {
+      embeds: [createEmbed("💣 Mines", `💥 **爆発！** ベットは没収されました。`, Colors.Red)],
+      components: reveal
+    });
   }
   const newOpened = bitSet(s.opened_mask, idx);
   await pool.query(`UPDATE casino_mines_sessions SET opened_mask=$2, updated_at=NOW() WHERE user_id=$1`, [uid, newOpened]);
@@ -972,7 +986,15 @@ async function handleMinesOpen(interaction, sid, idx) {
 async function handleMinesCash(interaction, sid) {
   const uid = interaction.user.id;
   const res = await pool.query(`SELECT * FROM casino_mines_sessions WHERE user_id=$1`, [uid]);
-  if (!res.rowCount) return ephemeralReply(interaction, { content: "Minesセッションが見つかりません。" });
+  if (!res.rowCount) {
+    try {
+      await interaction.message?.edit({
+        embeds: [createEmbed("💣 Mines", "このゲームは終了しています。", Colors.Red)],
+        components: []
+      });
+    } catch {}
+    return ephemeralReply(interaction, { content: "Minesセッションが見つかりません。" });
+  }
   const s = res.rows[0];
   if (s.session_id && s.session_id !== sid) {
     return ephemeralReply(interaction, { content: "古いUIです。最新の盤面から操作してください。" }, 12000);
@@ -982,12 +1004,23 @@ async function handleMinesCash(interaction, sid) {
   const pay = Math.floor(s.bet * mult);
   await addCoins(uid, pay, "casino_mines", `CASHOUT opened:${opened} mult:${mult.toFixed(2)} pay:${pay}`);
   await pool.query(`DELETE FROM casino_mines_sessions WHERE user_id=$1`, [uid]);
-  return respond(interaction, { embeds: [createEmbed("💣 Mines", `✅ 確定 **+${fmt(pay)}S**（×${mult.toFixed(2)}）`, Colors.Green)], components: [] });
+  return respond(interaction, {
+    embeds: [createEmbed("💣 Mines", `✅ 確定 **+${fmt(pay)}S**（×${mult.toFixed(2)}）`, Colors.Green)],
+    components: []
+  });
 }
 async function handleMinesPeek(interaction, sid) {
   const uid = interaction.user.id;
   const res = await pool.query(`SELECT * FROM casino_mines_sessions WHERE user_id=$1`, [uid]);
-  if (!res.rowCount) return ephemeralReply(interaction, { content: "Minesセッションが見つかりません。" });
+  if (!res.rowCount) {
+    try {
+      await interaction.message?.edit({
+        embeds: [createEmbed("💣 Mines", "このゲームは終了しています。", Colors.Red)],
+        components: []
+      });
+    } catch {}
+    return ephemeralReply(interaction, { content: "Minesセッションが見つかりません。" });
+  }
   const s = res.rows[0];
   if (s.session_id && s.session_id !== sid) {
     return ephemeralReply(interaction, { content: "古いUIです。最新の盤面から操作してください。" }, 12000);
@@ -1034,32 +1067,58 @@ async function startCrash(interaction, bet) {
     ) ]
   }, { ephemeral: false, noUpdate: false });
 
-  const tick = async () => {
+  // 既存タイマーがいたら消す（古いタイマーが新しいゲームを触らないように）
+  if (crashTimers.has(uid)) {
+    clearInterval(crashTimers.get(uid));
+    crashTimers.delete(uid);
+  }
+
+  const timer = setInterval(async () => {
     try {
       const r = await pool.query(`SELECT bet, started_at, target_crash, cashed_at FROM casino_crash_sessions WHERE user_id=$1`, [uid]);
-      if (!r.rowCount) { clearInterval(crashTimers.get(uid)); crashTimers.delete(uid); return; }
+      if (!r.rowCount) {
+        clearInterval(timer); crashTimers.delete(uid);
+        return;
+      }
       const s = r.rows[0];
       const nowX = crashMultipleSince(s.started_at);
       const tsec = (Date.now() - new Date(s.started_at).getTime()) / 1000;
 
-      if (s.cashed_at != null) { clearInterval(crashTimers.get(uid)); crashTimers.delete(uid); return; }
+      // 既に確定してればここで終了
+      if (s.cashed_at != null) {
+        clearInterval(timer); crashTimers.delete(uid);
+        return;
+      }
 
+      // クラッシュ到達
       if (tsec >= CRASH_MIN_DURATION_SEC && nowX >= Number(s.target_crash)) {
-        clearInterval(crashTimers.get(uid)); crashTimers.delete(uid);
+        clearInterval(timer); crashTimers.delete(uid);
+        // 先にDBから消す
+        await pool.query(`DELETE FROM casino_crash_sessions WHERE user_id=$1`, [uid]).catch(()=>{});
         await interaction.editReply({
           embeds: [createEmbed("📈 Crash", `💥 **CRASH** at ${Number(s.target_crash).toFixed(2)}x\n払い戻しなし`, Colors.Red)],
           components: []
         }).catch(()=>{});
-        await pool.query(`DELETE FROM casino_crash_sessions WHERE user_id=$1`, [uid]);
         return;
       }
+
+      // 進行中 → 倍率だけ更新
       await interaction.editReply({
         embeds: [createEmbed("📈 Crash", `現在倍率：**${nowX.toFixed(2)}x**\nクラッシュ前に確定を！`, Colors.Green)]
       }).catch(()=>{});
-    } catch {}
-  };
-  const h = setInterval(tick, Math.max(300, CRASH_TICK_MS|0));
-  crashTimers.set(uid, h);
+    } catch (e) {
+      // 何かあったらタイマーとセッションを落として終了状態に
+      clearInterval(timer); crashTimers.delete(uid);
+      await pool.query(`DELETE FROM casino_crash_sessions WHERE user_id=$1`, [uid]).catch(()=>{});
+      try {
+        await interaction.editReply({
+          embeds: [createEmbed("📈 Crash", "ゲーム表示の更新に失敗したため終了しました。", Colors.Red)],
+          components: []
+        });
+      } catch {}
+    }
+  }, Math.max(300, CRASH_TICK_MS|0));
+  crashTimers.set(uid, timer);
 }
 async function handleCrashCash(interaction, sid) {
   const uid = interaction.user.id;
@@ -1074,17 +1133,19 @@ async function handleCrashCash(interaction, sid) {
 
   if (tsec >= CRASH_MIN_DURATION_SEC && nowX >= Number(s.target_crash)) {
     await pool.query(`DELETE FROM casino_crash_sessions WHERE user_id=$1`, [uid]);
-    clearInterval(crashTimers.get(uid)); crashTimers.delete(uid);
+    if (crashTimers.has(uid)) { clearInterval(crashTimers.get(uid)); crashTimers.delete(uid); }
     return respond(interaction, { embeds: [createEmbed("📈 Crash", `💥 **CRASH** at ${Number(s.target_crash).toFixed(2)}x\n払い戻しなし`, Colors.Red)], components: [] });
   }
   if (s.cashed_at != null) {
+    if (crashTimers.has(uid)) { clearInterval(crashTimers.get(uid)); crashTimers.delete(uid); }
     return respond(interaction, { embeds: [createEmbed("📈 Crash", `既に ${Number(s.cashed_at).toFixed(2)}x で確定済みです。`, Colors.Grey)], components: [] });
   }
   const pay = Math.floor(Number(s.bet) * nowX);
   await addCoins(uid, pay, "casino_crash", `CASHOUT at ${nowX.toFixed(2)}x pay:${pay}`);
   await pool.query(`UPDATE casino_crash_sessions SET cashed_at=$2, updated_at=NOW() WHERE user_id=$1`, [uid, nowX]);
-  clearInterval(crashTimers.get(uid)); crashTimers.delete(uid);
-  await pool.query(`DELETE FROM casino_crash_sessions WHERE user_id=$1`, [uid]);
+  if (crashTimers.has(uid)) { clearInterval(crashTimers.get(uid)); crashTimers.delete(uid); }
+  // ゲーム終了なのでセッションも削除
+  await pool.query(`DELETE FROM casino_crash_sessions WHERE user_id=$1`, [uid]).catch(()=>{});
   return respond(interaction, { embeds: [createEmbed("📈 Crash", `✅ 確定 **+${fmt(pay)}S**（${nowX.toFixed(2)}x）`, Colors.Green)], components: [] });
 }
 
@@ -1109,7 +1170,6 @@ function buildDUTakeRow(uid, stake, step, gameLabel) {
 }
 // ==============================
 // ✅ iOS対策：3ボタン1行ビルダー（HL用クラスタ）
-// 署名: uid:stake:step:HL を signToken()。中央は du_take。
 // ==============================
 function buildDUClusterRowHL(uid, stake, first, step) {
   const payload = `${uid}:${stake}:${step}:HL`;
@@ -1130,12 +1190,42 @@ function buildDUClusterRowHL(uid, stake, first, step) {
 // ==============================
 // 返信系ヘルパ（iOS二重エフェメラル防止）
 // ==============================
+// 常設UIメッセージかどうかを判定して壊さないようにする
+function isPersistentUIMessage(interaction) {
+  if (!interaction?.message) return false;
+  const msg = interaction.message;
+  const title = msg.embeds?.[0]?.title || msg.embeds?.[0]?.data?.title;
+  const content = msg.content || "";
+  if (title === "コインメニュー") return true;
+  if (title === "🎰 TeamSDG’s Casino 🎰") return true;
+  if (content === "レースメニュー") return true;
+  if (content === "管理メニュー") return true;
+  return false;
+}
+
 // ❗ボタン/セレクト時：update() → editReply() → deferUpdate()。新規reply()はしない
 async function respond(interaction, payload, { ephemeral = false, noUpdate = false } = {}) {
   const data = { ...payload };
   if (typeof data.content === "string") data.content = limitContent(data.content);
   try {
-    if ((interaction.isButton?.() || interaction.isStringSelectMenu?.())) {
+    const isComponent = (interaction.isButton?.() || interaction.isStringSelectMenu?.());
+    const persistent = isComponent && isPersistentUIMessage(interaction);
+
+    if (isComponent) {
+      // 常設UIは上書きしない：エフェメラルで返す
+      if (persistent && (!data.components || data.components.length === 0)) {
+        try {
+          if (interaction.deferred || interaction.replied) {
+            return await interaction.followUp({ ...data, ephemeral: true });
+          } else {
+            return await interaction.reply({ ...data, ephemeral: true });
+          }
+        } catch (e) {
+          try { return await interaction.deferUpdate(); } catch {}
+          return;
+        }
+      }
+
       if (!noUpdate) {
         try { return await interaction.update(data); } catch (_) {}
       }
@@ -1408,9 +1498,7 @@ client.on("interactionCreate", async (interaction) => {
           // ✅ HL勝利 → DU開始時に meta.hl.card = next を保存（サーバー権威）
           await duStart(uid, pending, "HL", { hl: { card: next } });
 
-          // 旧2行ビルド（互換のため残すが、表示は1行クラスタへ）
-          const rowHL = buildHLGuessRow("du_hl_guess", pending, next, "0");
-          const rowTake = buildDUTakeRow(uid, pending, 0, "HL");
+          // 新1行表示
           const rowCluster = buildDUClusterRowHL(uid, pending, next, 0);
 
           const near = hlNearMissText(first, next);
@@ -1424,7 +1512,7 @@ client.on("interactionCreate", async (interaction) => {
         }
       }
 
-      // ===== ダブルアップHL：推測（サーバー権威：DBの meta.hl.card を基準に判定） =====
+      // ===== ダブルアップHL：推測 =====
       if (interaction.customId.startsWith("du_hl_guess:")) {
         const [, guess, pendingStr, _firstStrFromBtn, stepStr] = interaction.customId.split(":");
         const uid = interaction.user.id;
@@ -1436,13 +1524,11 @@ client.on("interactionCreate", async (interaction) => {
         const pending = Number(pendingStr);
         const step = Number(stepStr || 0);
         if (Number(sess.stake) !== pending || Number(sess.step) !== step) {
-          // 古いボタン：現在セッションで再構築（1行UI）
           const curFirst = Number(sess.meta?.hl?.card) || randInt(1,13);
           const rowCluster = buildDUClusterRowHL(uid, Number(sess.stake), curFirst, Number(sess.step||0));
           return respond(interaction, { embeds: [createEmbed("♠️ Double Up", "ボタンが古いため更新しました。")], components: [rowCluster] });
         }
 
-        // ✅ 信用しない: DB記録の基準カードを使用
         const first = Number(sess.meta?.hl?.card) || randInt(1,13);
         const next  = randInt(1, 13);
         const isHigh = next > first;
@@ -1450,19 +1536,14 @@ client.on("interactionCreate", async (interaction) => {
 
         if ((guess === "H" && isHigh) || (guess === "L" && isLow)) {
           await streakWin(uid);
-          const nextStake = Math.floor(pending * DOUBLEUP_MULT); // ③ 旧×2→×1.32
+          const nextStake = Math.floor(pending * DOUBLEUP_MULT);
           const nextStep = step + 1;
           if (nextStep >= DOUBLEUP_MAX_STEPS) {
             await addCoins(uid, nextStake, "casino_doubleup", `HL AUTO_TAKE step:${nextStep}`);
             await duClear(uid);
             return respond(interaction, { embeds: [createEmbed("♠️ Double Up", `✅ 最大回数に達したため自動確定：**+${fmt(nextStake)}S**`, Colors.Gold)], components: [] });
           }
-          // 次ラウンドの基準カードとして next を保存
           await duSave(uid, nextStake, nextStep, { hl: { card: next } });
-          // 旧2行（保持）
-          const rowHL = buildHLGuessRow("du_hl_guess", nextStake, next, String(nextStep));
-          const rowTake = buildDUTakeRow(uid, nextStake, nextStep, "HL");
-          // 新1行表示
           const rowCluster = buildDUClusterRowHL(uid, nextStake, next, nextStep);
 
           const line = `🃏 基準カード: **${first}** → **${next}**  ${hlNearMissText(first,next)}\n✅ 成功！ 現在の勝ち分：**${fmt(nextStake)}S**（${nextStep}/${DOUBLEUP_MAX_STEPS}）\n\n**次のラウンド**\n🃏 現在の基準カード: **${next}**\n🂠 次のカード: **?**（**同値は不正解**）`;
@@ -1690,7 +1771,7 @@ client.on("interactionCreate", async (interaction) => {
         return ephemeralReply(interaction, { embeds: [createEmbed("💳 払い戻し", `合計 **+${fmt(total)}S** を受け取りました。`, Colors.Gold)] });
       }
 
-      // ====== ウマ券 金額入力へ（馬名→index受け渡し短縮） ======
+      // ====== ウマ券 金額入力へ ======
       if (interaction.customId.startsWith("rumuma_bet_amount_go:")) {
         const [, raceIdStr, idxStr, sig] = interaction.customId.split(":");
         const payload = `${raceIdStr}:${idxStr}`;
@@ -1757,7 +1838,6 @@ client.on("interactionCreate", async (interaction) => {
         const menu = new StringSelectMenuBuilder()
           .setCustomId(`rumuma_bet_pick_horse:${raceId}`)
           .setPlaceholder(`#${raceId} ${r.rows[0].race_name} の馬を選択`)
-          // ✅ value は index にする（0..）
           .addOptions(...horses.map((h, i) => ({ label: h, value: String(i) })).slice(0, 25));
         return respond(interaction, { content: "馬を選択してください。", components: [new ActionRowBuilder().addComponents(menu)] });
       }
@@ -1984,7 +2064,7 @@ client.on("interactionCreate", async (interaction) => {
         return ephemeralReply(interaction, { embeds: [createEmbed("✅ 投票締切", `#${raceId} ${r.rows[0].race_name}`)] });
       }
 
-      // 後方互換：結果（モーダル）※レイク対応
+      // 後方互換：結果（モーダル）
       if (interaction.customId === "rumuma_result_modal") {
         const raceId = parseInt(interaction.fields.getTextInputValue("race_id"), 10);
         const winner = interaction.fields.getTextInputValue("winner").trim();
@@ -2066,7 +2146,7 @@ client.on("interactionCreate", async (interaction) => {
 });
 
 // ==============================
-// 発言報酬（① 最短文字数/クールダウン/日上限/週上限）
+// 発言報酬
 // ==============================
 const NG_WORDS = new Set(["ああ", "いい", "あ", "い", "う", "え", "お", "草", "w", "ｗ"]);
 const hashMessage = (t) => crypto.createHash("sha1").update(t).digest("hex");
@@ -2081,14 +2161,12 @@ client.on(Events.MessageCreate, async (msg) => {
     const content = (msg.content || "").trim();
     if (!content) return;
 
-    // ① 短文は対象外
     if (content.length < REWARD_MIN_MSG_LEN) return;
     if (NG_WORDS.has(content)) return;
 
-    const today = new Date().toISOString().slice(0, 10); // UTC
+    const today = new Date().toISOString().slice(0, 10);
     const h = hashMessage(content);
 
-    // 初回エントリ
     const inserted = await pool.query(
       `INSERT INTO message_rewards(user_id, date, count, last_message_at, last_message_hash)
        VALUES ($1,$2,1,NOW(),$3)
@@ -2096,7 +2174,6 @@ client.on(Events.MessageCreate, async (msg) => {
       [msg.author.id, today, h]
     );
     if (inserted.rowCount) {
-      // 週上限チェック
       await applyCarryIfAny(msg.author.id);
       const { grant } = await computeWeeklyGrant(msg.author.id, REWARD_PER_MESSAGE);
       if (grant > 0) await addCoins(msg.author.id, grant, "msg_reward", "初回メッセージ報酬");
@@ -2105,26 +2182,23 @@ client.on(Events.MessageCreate, async (msg) => {
 
     const res = await pool.query(`SELECT * FROM message_rewards WHERE user_id=$1`, [msg.author.id]);
     if (!res.rowCount) return;
+
     const row = res.rows[0];
 
-    // 日切替
     if (row.date !== today) {
       await pool.query(`UPDATE message_rewards SET date=$1, count=0 WHERE user_id=$2`, [today, msg.author.id]);
       row.count = 0;
     }
     if (row.count >= REWARD_DAILY_LIMIT) return;
 
-    // クールダウン/重複
     const lastAt = row.last_message_at ? new Date(row.last_message_at).getTime() : 0;
     const diffSec = (Date.now() - lastAt) / 1000;
     if (diffSec < REWARD_COOLDOWN_SEC) return;
     if (row.last_message_hash && row.last_message_hash === h) return;
 
-    // 週上限チェック
     await applyCarryIfAny(msg.author.id);
     const { grant } = await computeWeeklyGrant(msg.author.id, REWARD_PER_MESSAGE);
     if (grant <= 0) {
-      // 受け取り不可ならカウントだけ進めない（再トライ余地を残す）
       await pool.query(`UPDATE message_rewards SET last_message_at=NOW(), last_message_hash=$1 WHERE user_id=$2`, [h, msg.author.id]);
       return;
     }
@@ -2142,13 +2216,13 @@ client.on(Events.MessageCreate, async (msg) => {
 // ==============================
 // デイリー受取リセット（JST 05:00）
 // ==============================
-schedule.scheduleJob("0 20 * * *", async () => { // UTC20:00 = JST05:00
+schedule.scheduleJob("0 20 * * *", async () => {
   await pool.query("DELETE FROM daily_claims");
   logInfo("✅ デイリー受取リセット完了 (JST05:00)");
 });
 
 // ==============================
-// Slashコマンド登録（/ui, /jackpot, /balance, /gacha_ev）
+// Slashコマンド登録
 // ==============================
 async function registerCommands() {
   const cmds = [
@@ -2200,5 +2274,3 @@ http.createServer((req, res) => {
 }).listen(PORT, () => {
   logInfo(`🌐 HTTP server running on port ${PORT}`);
 });
-
-// 完全出力完了
