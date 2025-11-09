@@ -972,7 +972,7 @@ async function handleMinesOpen(interaction, sid, idx) {
     return respond(interaction, {
       embeds: [createEmbed("💣 Mines", `💥 **爆発！** ベットは没収されました。`, Colors.Red)],
       components: reveal
-    });
+    }, { deleteAfterMs: 60000 });
   }
   const newOpened = bitSet(s.opened_mask, idx);
   await pool.query(`UPDATE casino_mines_sessions SET opened_mask=$2, updated_at=NOW() WHERE user_id=$1`, [uid, newOpened]);
@@ -1007,7 +1007,7 @@ async function handleMinesCash(interaction, sid) {
   return respond(interaction, {
     embeds: [createEmbed("💣 Mines", `✅ 確定 **+${fmt(pay)}S**（×${mult.toFixed(2)}）`, Colors.Green)],
     components: []
-  });
+  }, { deleteAfterMs: 60000 });
 }
 async function handleMinesPeek(interaction, sid) {
   const uid = interaction.user.id;
@@ -1099,6 +1099,9 @@ async function startCrash(interaction, bet) {
           embeds: [createEmbed("📈 Crash", `💥 **CRASH** at ${Number(s.target_crash).toFixed(2)}x\n払い戻しなし`, Colors.Red)],
           components: []
         }).catch(()=>{});
+        setTimeout(() => {
+          interaction.deleteReply?.().catch(() => {});
+        }, 60000);
         return;
       }
 
@@ -1134,7 +1137,7 @@ async function handleCrashCash(interaction, sid) {
   if (tsec >= CRASH_MIN_DURATION_SEC && nowX >= Number(s.target_crash)) {
     await pool.query(`DELETE FROM casino_crash_sessions WHERE user_id=$1`, [uid]);
     if (crashTimers.has(uid)) { clearInterval(crashTimers.get(uid)); crashTimers.delete(uid); }
-    return respond(interaction, { embeds: [createEmbed("📈 Crash", `💥 **CRASH** at ${Number(s.target_crash).toFixed(2)}x\n払い戻しなし`, Colors.Red)], components: [] });
+    return respond(interaction, { embeds: [createEmbed("📈 Crash", `💥 **CRASH** at ${Number(s.target_crash).toFixed(2)}x\n払い戻しなし`, Colors.Red)], components: [] }, { deleteAfterMs: 60000 });
   }
   if (s.cashed_at != null) {
     if (crashTimers.has(uid)) { clearInterval(crashTimers.get(uid)); crashTimers.delete(uid); }
@@ -1146,7 +1149,7 @@ async function handleCrashCash(interaction, sid) {
   if (crashTimers.has(uid)) { clearInterval(crashTimers.get(uid)); crashTimers.delete(uid); }
   // ゲーム終了なのでセッションも削除
   await pool.query(`DELETE FROM casino_crash_sessions WHERE user_id=$1`, [uid]).catch(()=>{});
-  return respond(interaction, { embeds: [createEmbed("📈 Crash", `✅ 確定 **+${fmt(pay)}S**（${nowX.toFixed(2)}x）`, Colors.Green)], components: [] });
+  return respond(interaction, { embeds: [createEmbed("📈 Crash", `✅ 確定 **+${fmt(pay)}S**（${nowX.toFixed(2)}x）`, Colors.Green)], components: [] }, { deleteAfterMs: 60000 });
 }
 
 // HL（③）：基準カード公開＆倍率再設計
@@ -1204,9 +1207,20 @@ function isPersistentUIMessage(interaction) {
 }
 
 // ❗ボタン/セレクト時：update() → editReply() → deferUpdate()。新規reply()はしない
-async function respond(interaction, payload, { ephemeral = false, noUpdate = false } = {}) {
+async function respond(interaction, payload, { ephemeral = false, noUpdate = false, deleteAfterMs = 0 } = {}) {
   const data = { ...payload };
   if (typeof data.content === "string") data.content = limitContent(data.content);
+
+  const scheduleDelete = (msg) => {
+    if (!deleteAfterMs || deleteAfterMs <= 0) return;
+    setTimeout(() => {
+      if (msg && typeof msg.delete === "function") {
+        msg.delete().catch(() => {});
+      }
+      interaction.deleteReply?.().catch(() => {});
+    }, deleteAfterMs);
+  };
+
   try {
     const isComponent = (interaction.isButton?.() || interaction.isStringSelectMenu?.());
     const persistent = isComponent && isPersistentUIMessage(interaction);
@@ -1215,35 +1229,59 @@ async function respond(interaction, payload, { ephemeral = false, noUpdate = fal
       // 常設UIは上書きしない：エフェメラルで返す
       if (persistent && (!data.components || data.components.length === 0)) {
         try {
+          let m;
           if (interaction.deferred || interaction.replied) {
-            return await interaction.followUp({ ...data, ephemeral: true });
+            m = await interaction.followUp({ ...data, ephemeral: true });
           } else {
-            return await interaction.reply({ ...data, ephemeral: true });
+            m = await interaction.reply({ ...data, ephemeral: true });
           }
+          scheduleDelete(m);
+          return m;
         } catch (e) {
-          try { return await interaction.deferUpdate(); } catch {}
+          try { await interaction.deferUpdate(); } catch {}
           return;
         }
       }
 
       if (!noUpdate) {
-        try { return await interaction.update(data); } catch (_) {}
+        try {
+          const m = await interaction.update(data);
+          scheduleDelete(m);
+          return m;
+        } catch (_) {}
       }
       if (interaction.deferred || interaction.replied) {
-        try { return await interaction.editReply(data); } catch (_) {}
+        try {
+          const m = await interaction.editReply(data);
+          scheduleDelete(m);
+          return m;
+        } catch (_) {}
       }
-      try { return await interaction.deferUpdate(); } catch {}
+      try {
+        await interaction.deferUpdate();
+        scheduleDelete(null);
+      } catch {}
       return;
     } else {
       if (interaction.deferred || interaction.replied) {
-        try { return await interaction.editReply(data); } catch (_) {}
+        try {
+          const m = await interaction.editReply(data);
+          scheduleDelete(m);
+          return m;
+        } catch (_) {}
       }
-      try { return await interaction.reply({ ...data, ephemeral }); } catch (_) {}
-      return await interaction.followUp({ ...data, ephemeral: true });
+      try {
+        const m = await interaction.reply({ ...data, ephemeral });
+        scheduleDelete(m);
+        return m;
+      } catch (_) {}
+      const m = await interaction.followUp({ ...data, ephemeral: true });
+      scheduleDelete(m);
+      return m;
     }
   } catch (e) {
     logError("respond() failed:", e);
-    try { return await interaction.deferUpdate(); } catch {}
+    try { await interaction.deferUpdate(); } catch {}
   }
 }
 // エフェメラル専用：必要時のみ使う
@@ -1356,8 +1394,7 @@ client.on("interactionCreate", async (interaction) => {
             { label: "rumuma", value: "rumuma" },
             { label: "casino", value: "casino" },
           );
-        const row = new ActionRowBuilder().addComponents(menu);
-        return ephemeralReply(interaction, { content: "UI再表示メニュー", components: [row] }, 30000);
+        return ephemeralReply(interaction, { content: "UI再表示メニュー", components: [menu] }, 30000);
       }
       if (interaction.customId === "admin_rumuma_reset") {
         if (!interaction.member?.permissions?.has(PermissionsBitField.Flags.Administrator))
@@ -1366,7 +1403,7 @@ client.on("interactionCreate", async (interaction) => {
           .setCustomId("admin_rumuma_reset_confirm")
           .setPlaceholder("⚠️ 開催中の全レースをキャンセルして返金します。続行しますか？")
           .addOptions({ label: "はい（実行）", value: "yes" }, { label: "いいえ（中止）", value: "no" });
-        return ephemeralReply(interaction, { content: "レース全リセット 確認", components: [new ActionRowBuilder().addComponents(menu)] }, 30000);
+        return ephemeralReply(interaction, { content: "レース全リセット 確認", components: [menu] }, 30000);
       }
 
       // コイン系
