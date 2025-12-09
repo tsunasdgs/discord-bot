@@ -5,6 +5,49 @@
 // + UI永続化ガード・Crash/Mines 終了強制反映
 // ==============================
 
+// index.mjs の先頭付近
+process.on('unhandledRejection', (reason) => {
+  console.error('=== Unhandled Rejection ===');
+  console.error(reason);
+});
+
+process.on('uncaughtException', (err) => {
+  console.error('=== Uncaught Exception ===');
+  console.error(err);
+});
+
+// config からトークン読んでる想定
+import { config } from './config.js';
+// もしくは直接 env なら
+// const token = process.env.DISCORD_TOKEN;
+
+console.log('NODE_ENV on Render:', process.env.NODE_ENV);
+console.log('DISCORD_TOKEN length:', config.token?.length ?? 'undefined');
+// 絶対に中身全部は出さないこと
+console.log('DISCORD_TOKEN head:', config.token?.slice(0, 6));
+
+// client 周り
+client.once('ready', () => {
+  console.log(`🤖 Logged in as ${client.user.tag}`);
+});
+
+client.on('error', (err) => {
+  console.error('🤖 client error:', err);
+});
+
+client.on('shardError', (err) => {
+  console.error('🤖 shard error:', err);
+});
+
+// 実際にログインしてるところ
+client.login(config.token)
+  .then(() => {
+    console.log('✅ client.login resolved');
+  })
+  .catch((err) => {
+    console.error('❌ client.login failed:');
+    console.error(err);
+  });
 import {
   Client, GatewayIntentBits, Partials,
   ActionRowBuilder, ButtonBuilder, ButtonStyle,
