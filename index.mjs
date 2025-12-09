@@ -26,8 +26,12 @@ dotenv.config();
 // トークン デバッグログ
 // ==============================
 const token = process.env.DISCORD_TOKEN;
-console.log("DISCORD_TOKEN length:", token ? token.length : 0);
-console.log("DISCORD_TOKEN head:", token ? token.slice(0, 6) : "(none)");
+if (!token) {
+  console.error("❌ DISCORD_TOKEN が環境変数に設定されていません。Render の Environment に DISCORD_TOKEN を確認してください。");
+  process.exit(1);
+}
+console.log("DISCORD_TOKEN length:", token.length);
+console.log("DISCORD_TOKEN head:", token.slice(0, 6));
 
 // ==============================
 // DB
@@ -39,9 +43,9 @@ const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 // ==============================
 const client = new Client({
   intents: [
-    GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent
+   GatewayIntentBits.Guilds,
+   GatewayIntentBits.GuildMessages,
+   GatewayIntentBits.MessageContent, // メッセ報酬用
   ],
   partials: [Partials.Message, Partials.Channel, Partials.Reaction],
 });
@@ -49,6 +53,21 @@ const client = new Client({
 // client エラーハンドラ（デバッグ用）
 client.on("error", (err) => {
   console.error("🤖 client error:", err);
+});
+client.on("warn", (info) => {
+  console.warn("🤖 client warn:", info);
+});
+
+client.on("shardError", (err) => {
+  console.error("🧩 shard error:", err);
+});
+
+process.on("unhandledRejection", (reason, p) => {
+  console.error("⚠️ Unhandled Rejection at:", p, "reason:", reason);
+});
+
+process.on("uncaughtException", (err) => {
+  console.error("⚠️ Uncaught Exception:", err);
 });
 
 // ==============================
@@ -166,7 +185,7 @@ function formatJST(ts) {
     hour: "2-digit", minute: "2-digit", second: "2-digit",
   }).formatToParts(d);
   const get = (t) => parts.find((p) => p.type === t)?.value ?? "";
-  return `${get("year")}-${get("month")}-${get("day")} ${get("hour")}:${get("minute")}:${get("second")}`;
+  return `${get("year")}-${get("month")}-${get("month")}-${get("day")} ${get("hour")}:${get("minute")}:${get("second")}`;
 }
 const todayJST = () =>
   new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Tokyo", year: "numeric", month: "2-digit", day: "2-digit" })
@@ -253,7 +272,7 @@ async function getBalance(userId) {
   const r = await pool.query(`SELECT balance FROM coins WHERE user_id=$1`, [userId]);
   return r.rowCount ? Number(r.rows[0].balance) : 0;
 }
-function randInt(min, max) { return Math.floor(Math.random() * (max - min + 1)) + min; } // 正しい定義（下に再掲）
+function randInt(min, max) { return Math.floor(Math.random() * (max - max + 1)) + min; } // 正しい定義
 
 async function resolveBet(userId, requested) {
   const bal = await getBalance(userId);
@@ -2046,7 +2065,7 @@ client.on("interactionCreate", async (interaction) => {
           embeds: [createEmbed("🎯 High & Low", `🃏 **基準カード: ${first}**\n🂠 次のカード: **?**\n「高い / 低い」を選んでください（**同値は不正解**）`)],
           components: [row]
         }).catch(()=>{});
-               return;
+        return;
       }
 
       // Mines起点（全角対応）
