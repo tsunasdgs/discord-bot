@@ -5,14 +5,32 @@
 // + UI永続化ガード・Crash/Mines 終了強制反映
 // ==============================
 
-// ★ まずこの行を削除 or コメントアウト
-// import { config } from './config.js';
+// 1. import と環境変数読み込み
+import { Client, GatewayIntentBits } from 'discord.js';
+// 他の import...
 
-// 環境変数を直接読む
 const token = process.env.DISCORD_TOKEN;
 
+// 2. client を先に作る
+const client = new Client({
+  intents: [
+    GatewayIntentBits.Guilds,
+    // 必要な intents ...
+  ],
+});
+
+// 3. イベントハンドラ
+client.once('ready', () => {
+  console.log(`🤖 Logged in as ${client.user.tag}`);
+});
+
+client.on('error', (err) => {
+  console.error('🤖 client error:', err);
+});
+
+// 4. デバッグログ + login（ここは client 定義の「あと」に置く）
 console.log('DISCORD_TOKEN length:', token?.length);
-console.log('DISCORD_TOKEN head:', token?.slice(0, 6)); // 中身全部は絶対出さない
+console.log('DISCORD_TOKEN head:', token?.slice(0, 6)); // 先頭だけでOK
 
 client.login(token)
   .then(() => {
@@ -22,6 +40,8 @@ client.login(token)
     console.error('❌ client.login failed:');
     console.error(err);
   });
+
+// 5. その下に HTTP サーバー起動や DB 初期化など既存の処理
 import {
   Client, GatewayIntentBits, Partials,
   ActionRowBuilder, ButtonBuilder, ButtonStyle,
