@@ -5,43 +5,6 @@
 // + UI永続化ガード・Crash/Mines 終了強制反映
 // ==============================
 
-// 1. import と環境変数読み込み
-import { Client, GatewayIntentBits } from 'discord.js';
-// 他の import...
-
-const token = process.env.DISCORD_TOKEN;
-
-// 2. client を先に作る
-const client = new Client({
-  intents: [
-    GatewayIntentBits.Guilds,
-    // 必要な intents ...
-  ],
-});
-
-// 3. イベントハンドラ
-client.once('ready', () => {
-  console.log(`🤖 Logged in as ${client.user.tag}`);
-});
-
-client.on('error', (err) => {
-  console.error('🤖 client error:', err);
-});
-
-// 4. デバッグログ + login（ここは client 定義の「あと」に置く）
-console.log('DISCORD_TOKEN length:', token?.length);
-console.log('DISCORD_TOKEN head:', token?.slice(0, 6)); // 先頭だけでOK
-
-client.login(token)
-  .then(() => {
-    console.log('✅ client.login resolved');
-  })
-  .catch((err) => {
-    console.error('❌ client.login failed:');
-    console.error(err);
-  });
-
-// 5. その下に HTTP サーバー起動や DB 初期化など既存の処理
 import {
   Client, GatewayIntentBits, Partials,
   ActionRowBuilder, ButtonBuilder, ButtonStyle,
@@ -65,12 +28,33 @@ dotenv.config();
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 
 // ==============================
-// クライアント
+// トークン & クライアント（2. client を先に作る）
 // ==============================
+const token = process.env.DISCORD_TOKEN;
+
 const client = new Client({
-  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent],
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent,
+  ],
   partials: [Partials.Message, Partials.Channel, Partials.Reaction],
 });
+
+// 3. イベントハンドラ（ログ用）
+// 下の「READY」ハンドラとは別に動きます（両方1回ずつ実行）
+client.once("ready", () => {
+  console.log(`🤖 Logged in as ${client.user.tag}`);
+});
+
+// エラー監視
+client.on("error", (err) => {
+  console.error("🤖 client error:", err);
+});
+
+// 4. デバッグログ（トークン長と先頭のみ）
+console.log("DISCORD_TOKEN length:", token?.length);
+console.log("DISCORD_TOKEN head:", token ? String(token).slice(0, 6) : "undefined");
 
 // ==============================
 // 環境設定（新既定を反映／未設定でも動く）
@@ -154,7 +138,7 @@ const CRASH_MAX_X              = Number(process.env.CRASH_MAX_X || "10.0");
 // ルムマ（⑥ レイク）
 const RUMUMA_RAKE_BP     = Number(process.env.RUMUMA_RAKE_BP || "2"); // %
 
-// 演出（⑦）
+– 演出（⑦）
 const FX_FIREWORKS_ENABLED = (process.env.FX_FIREWORKS_ENABLED || "true").toLowerCase() === "true";
 
 // その他
@@ -274,7 +258,7 @@ async function getBalance(userId) {
   const r = await pool.query(`SELECT balance FROM coins WHERE user_id=$1`, [userId]);
   return r.rowCount ? Number(r.rows[0].balance) : 0;
 }
-const randInt = (min, max) => Math.floor(Math.random() * (max - min + 1)) + min;
+const randInt = (min, max) => Math.floor(Math.random() * (max - max + 1)) + min;
 async function resolveBet(userId, requested) {
   const bal = await getBalance(userId);
   const maxByBalance = Math.max(0, Math.min(bal, CASINO_BET_MAX));
@@ -1388,7 +1372,7 @@ client.on("interactionCreate", async (interaction) => {
         const baseEV = pS*rS + pSR*rSR + pSSR*rSSR - GACHA_COST;
         const text = [
           `プリセット：**${conf.preset}**（個別ENVより優先）`,
-          `確率：S=${(pS*100).toFixed(2)}% / SR=${(pSR*100).toFixed(2)}% / SSR=${(pSSR*100).toFixed(2)}%`,
+          `確率：S=${((pS)*100).toFixed(2)}% / SR=${((pSR)*100).toFixed(2)}% / SSR=${((pSSR)*100).toFixed(2)}%`,
           `配当：S=${rS} / SR=${rSR} / SSR=${rSSR}`,
           `基礎EV（JP除外）：**${baseEV.toFixed(2)} S/回**`,
           `JPテイク率：${(GACHA_JP_TAKE_RATE*100).toFixed(0)}%（総EVは中立扱い）`,
@@ -2336,11 +2320,18 @@ client.once("ready", async () => {
   }
 });
 
-client.login(process.env.DISCORD_TOKEN);
+// ==============================
+// ログイン + HTTP (Render keep-alive)
+// ==============================
+client.login(token)
+  .then(() => {
+    console.log("✅ client.login resolved");
+  })
+  .catch((err) => {
+    console.error("❌ client.login failed:");
+    console.error(err);
+  });
 
-// ==============================
-// HTTP (Render keep-alive)
-// ==============================
 const PORT = process.env.PORT || 10000;
 http.createServer((req, res) => {
   res.writeHead(200, { "Content-Type": "text/plain" });
