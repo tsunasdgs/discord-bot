@@ -2387,6 +2387,18 @@ client.login(token)
     console.error("❌ client.login failed:");
     console.error(err);
   });
+console.log("DISCORD_TOKEN length:", token.length);
+console.log("DISCORD_TOKEN head:", token.slice(0, 6));
+
+console.log("🔌 client.login() 実行開始");
+client.login(token)
+  .then(() => {
+    console.log("✅ client.login resolved");
+  })
+  .catch((err) => {
+    console.error("❌ client.login failed:");
+    console.error(err);
+  });
 
 // 追加：debugログを見たいときだけ LOG_LEVEL=debug にする
 if (LOG_LEVEL === "debug") {
