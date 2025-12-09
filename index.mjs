@@ -2333,20 +2333,37 @@ async function trySendUIById(id, type) {
   const ch = await client.channels.fetch(id).catch(() => null);
   if (ch) await sendUI(ch, type);
 }
+
 client.once("ready", async () => {
   logInfo(`✅ Logged in as ${client.user.tag}`);
-  await ensureTables();
-  await registerCommands();
+  try {
+    await ensureTables();
+    logInfo("✅ ensureTables() 完了");
+  } catch (e) {
+    logError("❌ ensureTables() でエラー:", e);
+  }
+
+  try {
+    await registerCommands();
+    logInfo("✅ Slash コマンド登録完了");
+  } catch (e) {
+    logError("❌ registerCommands() でエラー:", e);
+  }
 
   if (UI_AUTO_POST_ON_READY) {
-    if (process.env.ADMIN_CHANNEL_ID) await trySendUIById(process.env.ADMIN_CHANNEL_ID, "admin");
-    if (DAILY_CHANNEL_ID) await trySendUIById(DAILY_CHANNEL_ID, "daily");
-    if (process.env.RUMUMA_CHANNELS) {
-      for (const cid of process.env.RUMUMA_CHANNELS.split(",").map(s => s.trim()).filter(Boolean)) {
-        await trySendUIById(cid, "rumuma");
+    logInfo("ℹ️ UI_AUTO_POST_ON_READY = true → UI自動ポスト開始");
+    try {
+      if (process.env.ADMIN_CHANNEL_ID) await trySendUIById(process.env.ADMIN_CHANNEL_ID, "admin");
+      if (DAILY_CHANNEL_ID) await trySendUIById(DAILY_CHANNEL_ID, "daily");
+      if (process.env.RUMUMA_CHANNELS) {
+        for (const cid of process.env.RUMUMA_CHANNELS.split(",").map(s => s.trim()).filter(Boolean)) {
+          await trySendUIById(cid, "rumuma");
+        }
       }
+      if (CASINO_CHANNEL_ID) await trySendUIById(CASINO_CHANNEL_ID, "casino");
+    } catch (e) {
+      logError("❌ UI 自動ポスト中にエラー:", e);
     }
-    if (CASINO_CHANNEL_ID) await trySendUIById(CASINO_CHANNEL_ID, "casino");
   } else {
     logInfo("ℹ️ UI auto-post on ready is disabled (UI_AUTO_POST_ON_READY=false). Use /ui when needed.");
   }
@@ -2355,14 +2372,26 @@ client.once("ready", async () => {
 // ==============================
 // LOGIN + デバッグログ
 // ==============================
+
+// ⭐ トークン自体のログ出力は安全のためコメントアウト推奨（もう長さが確認できたので）
+// console.log("DISCORD_TOKEN length:", token.length);
+// console.log("DISCORD_TOKEN head:", token.slice(0, 6));
+
+console.log("🔌 client.login() 実行開始");
+
 client.login(token)
   .then(() => {
-    console.log("✅ client.login resolved");
+    console.log("✅ client.login resolved（Discord への接続開始）");
   })
   .catch((err) => {
     console.error("❌ client.login failed:");
     console.error(err);
   });
+
+// 追加：debugログを見たいときだけ LOG_LEVEL=debug にする
+if (LOG_LEVEL === "debug") {
+  client.on("debug", (m) => console.log("🪲 [discord.js debug]", m));
+}
 
 // ==============================
 // HTTP (Render keep-alive)
