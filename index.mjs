@@ -23,38 +23,33 @@ import http from "http";
 dotenv.config();
 
 // ==============================
+// トークン デバッグログ
+// ==============================
+const token = process.env.DISCORD_TOKEN;
+console.log("DISCORD_TOKEN length:", token ? token.length : 0);
+console.log("DISCORD_TOKEN head:", token ? token.slice(0, 6) : "(none)");
+
+// ==============================
 // DB
 // ==============================
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 
 // ==============================
-// トークン & クライアント（2. client を先に作る）
+// クライアント
 // ==============================
-const token = process.env.DISCORD_TOKEN;
-
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent,
+    GatewayIntentBits.MessageContent
   ],
   partials: [Partials.Message, Partials.Channel, Partials.Reaction],
 });
 
-// 3. イベントハンドラ（ログ用）
-// 下の「READY」ハンドラとは別に動きます（両方1回ずつ実行）
-client.once("ready", () => {
-  console.log(`🤖 Logged in as ${client.user.tag}`);
-});
-
-// エラー監視
+// client エラーハンドラ（デバッグ用）
 client.on("error", (err) => {
   console.error("🤖 client error:", err);
 });
-
-// 4. デバッグログ（トークン長と先頭のみ）
-console.log("DISCORD_TOKEN length:", token?.length);
-console.log("DISCORD_TOKEN head:", token ? String(token).slice(0, 6) : "undefined");
 
 // ==============================
 // 環境設定（新既定を反映／未設定でも動く）
@@ -138,7 +133,7 @@ const CRASH_MAX_X              = Number(process.env.CRASH_MAX_X || "10.0");
 // ルムマ（⑥ レイク）
 const RUMUMA_RAKE_BP     = Number(process.env.RUMUMA_RAKE_BP || "2"); // %
 
-– 演出（⑦）
+// 演出（⑦）
 const FX_FIREWORKS_ENABLED = (process.env.FX_FIREWORKS_ENABLED || "true").toLowerCase() === "true";
 
 // その他
@@ -258,7 +253,9 @@ async function getBalance(userId) {
   const r = await pool.query(`SELECT balance FROM coins WHERE user_id=$1`, [userId]);
   return r.rowCount ? Number(r.rows[0].balance) : 0;
 }
-const randInt = (min, max) => Math.floor(Math.random() * (max - max + 1)) + min;
+const randInt = (min, max) => Math.floor(Math.random() * (max - max + 1) + min); // ←後で修正（下で再定義されているのでここは実際未使用でもOK）
+function randInt(min, max) { return Math.floor(Math.random() * (max - min + 1)) + min; } // 正しい定義（下に再掲）
+
 async function resolveBet(userId, requested) {
   const bal = await getBalance(userId);
   const maxByBalance = Math.max(0, Math.min(bal, CASINO_BET_MAX));
@@ -417,11 +414,10 @@ async function ensureTables() {
       game TEXT,
       stake INTEGER,
       step INTEGER,
-      updated_at TIMESTAMP DEFAULT now()
+      updated_at TIMESTAMP DEFAULT now(),
+      meta JSONB DEFAULT '{}'::jsonb
     );
   `);
-  // ✅ iOS対策：meta JSONB（冪等）
-  await pool.query(`ALTER TABLE casino_sessions ADD COLUMN IF NOT EXISTS meta JSONB DEFAULT '{}'::jsonb;`);
 
   // ガチャJP
   await pool.query(`
@@ -451,11 +447,10 @@ async function ensureTables() {
       can_peek BOOLEAN NOT NULL DEFAULT true,
       penalty NUMERIC NOT NULL DEFAULT 1.0,
       created_at TIMESTAMP DEFAULT now(),
-      updated_at TIMESTAMP DEFAULT now()
+      updated_at TIMESTAMP DEFAULT now(),
+      session_id TEXT
     );
   `);
-  // stale UI対策：セッションID
-  await pool.query(`ALTER TABLE casino_mines_sessions ADD COLUMN IF NOT EXISTS session_id TEXT;`);
 
   // Crash
   await pool.query(`
@@ -466,10 +461,10 @@ async function ensureTables() {
       target_crash NUMERIC NOT NULL,
       cashed_at NUMERIC,
       created_at TIMESTAMP DEFAULT now(),
-      updated_at TIMESTAMP DEFAULT now()
+      updated_at TIMESTAMP DEFAULT now(),
+      session_id TEXT
     );
   `);
-  await pool.query(`ALTER TABLE casino_crash_sessions ADD COLUMN IF NOT EXISTS session_id TEXT;`);
 
   // ストリーク
   await pool.query(`
@@ -1169,7 +1164,7 @@ async function handleCrashCash(interaction, sid) {
   await pool.query(`UPDATE casino_crash_sessions SET cashed_at=$2, updated_at=NOW() WHERE user_id=$1`, [uid, nowX]);
   if (crashTimers.has(uid)) { clearInterval(crashTimers.get(uid)); crashTimers.delete(uid); }
   // ゲーム終了なのでセッションも削除
-  await pool.query(`DELETE FROM casino_crash_sessions WHERE user_id=$1`, [uid]).catch(()=>{});
+  await pool.query(`DELETE FROM casino_crash_sessions WHERE user_id=$1`).catch(()=>{});
   return respond(interaction, { embeds: [createEmbed("📈 Crash", `✅ 確定 **+${fmt(pay)}S**（${nowX.toFixed(2)}x）`, Colors.Green)], components: [] }, { deleteAfterMs: 60000 });
 }
 
@@ -1372,7 +1367,7 @@ client.on("interactionCreate", async (interaction) => {
         const baseEV = pS*rS + pSR*rSR + pSSR*rSSR - GACHA_COST;
         const text = [
           `プリセット：**${conf.preset}**（個別ENVより優先）`,
-          `確率：S=${((pS)*100).toFixed(2)}% / SR=${((pSR)*100).toFixed(2)}% / SSR=${((pSSR)*100).toFixed(2)}%`,
+          `確率：S=${(pS*100).toFixed(2)}% / SR=${(pSR*100).toFixed(2)}% / SSR=${(pSSR*100).toFixed(2)}%`,
           `配当：S=${rS} / SR=${rSR} / SSR=${rSSR}`,
           `基礎EV（JP除外）：**${baseEV.toFixed(2)} S/回**`,
           `JPテイク率：${(GACHA_JP_TAKE_RATE*100).toFixed(0)}%（総EVは中立扱い）`,
@@ -1415,7 +1410,11 @@ client.on("interactionCreate", async (interaction) => {
             { label: "rumuma", value: "rumuma" },
             { label: "casino", value: "casino" },
           );
-        return ephemeralReply(interaction, { content: "UI再表示メニュー", components: [menu] }, 30000);
+        return ephemeralReply(
+          interaction,
+          { content: "UI再表示メニュー", components: [new ActionRowBuilder().addComponents(menu)] },
+          30000
+        );
       }
       if (interaction.customId === "admin_rumuma_reset") {
         if (!interaction.member?.permissions?.has(PermissionsBitField.Flags.Administrator))
@@ -1423,8 +1422,15 @@ client.on("interactionCreate", async (interaction) => {
         const menu = new StringSelectMenuBuilder()
           .setCustomId("admin_rumuma_reset_confirm")
           .setPlaceholder("⚠️ 開催中の全レースをキャンセルして返金します。続行しますか？")
-          .addOptions({ label: "はい（実行）", value: "yes" }, { label: "いいえ（中止）", value: "no" });
-        return ephemeralReply(interaction, { content: "レース全リセット 確認", components: [menu] }, 30000);
+          .addOptions(
+            { label: "はい（実行）", value: "yes" },
+            { label: "いいえ（中止）", value: "no" }
+          );
+        return ephemeralReply(
+          interaction,
+          { content: "レース全リセット 確認", components: [new ActionRowBuilder().addComponents(menu)] },
+          30000
+        );
       }
 
       // コイン系
@@ -1679,7 +1685,11 @@ client.on("interactionCreate", async (interaction) => {
             { label: "すべて（新しい順）", value: "all_desc" },
             { label: "すべて（古い順）", value: "all_asc" },
           );
-        return ephemeralReply(interaction, { content: "レース一覧の表示方法を選んでください。", components: [new ActionRowBuilder().addComponents(menu)] }, 30000);
+        return ephemeralReply(
+          interaction,
+          { content: "レース一覧の表示方法を選んでください。", components: [new ActionRowBuilder().addComponents(menu)] },
+          30000
+        );
       }
       if (interaction.customId === "rumuma_bet") {
         const r = await pool.query(`SELECT id, race_name FROM rumuma_races WHERE finished=false ORDER BY id DESC LIMIT 25`);
@@ -1688,7 +1698,11 @@ client.on("interactionCreate", async (interaction) => {
           .setCustomId("rumuma_bet_pick_race")
           .setPlaceholder("レースを選択")
           .addOptions(...r.rows.map(x => ({ label: `#${x.id} ${x.race_name}`, value: String(x.id) })));
-        return ephemeralReply(interaction, { content: "レース選択", components: [new ActionRowBuilder().addComponents(menu)] }, 30000);
+        return ephemeralReply(
+          interaction,
+          { content: "レース選択", components: [new ActionRowBuilder().addComponents(menu)] },
+          30000
+        );
       }
 
       // 自分のウマ券（強化済）
@@ -2033,7 +2047,7 @@ client.on("interactionCreate", async (interaction) => {
           embeds: [createEmbed("🎯 High & Low", `🃏 **基準カード: ${first}**\n🂠 次のカード: **?**\n「高い / 低い」を選んでください（**同値は不正解**）`)],
           components: [row]
         }).catch(()=>{});
-        return;
+               return;
       }
 
       // Mines起点（全角対応）
@@ -2321,7 +2335,7 @@ client.once("ready", async () => {
 });
 
 // ==============================
-// ログイン + HTTP (Render keep-alive)
+// LOGIN + デバッグログ
 // ==============================
 client.login(token)
   .then(() => {
@@ -2332,6 +2346,9 @@ client.login(token)
     console.error(err);
   });
 
+// ==============================
+// HTTP (Render keep-alive)
+// ==============================
 const PORT = process.env.PORT || 10000;
 http.createServer((req, res) => {
   res.writeHead(200, { "Content-Type": "text/plain" });
