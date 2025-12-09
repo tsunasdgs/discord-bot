@@ -253,7 +253,6 @@ async function getBalance(userId) {
   const r = await pool.query(`SELECT balance FROM coins WHERE user_id=$1`, [userId]);
   return r.rowCount ? Number(r.rows[0].balance) : 0;
 }
-const randInt = (min, max) => Math.floor(Math.random() * (max - max + 1) + min); // ←後で修正（下で再定義されているのでここは実際未使用でもOK）
 function randInt(min, max) { return Math.floor(Math.random() * (max - min + 1)) + min; } // 正しい定義（下に再掲）
 
 async function resolveBet(userId, requested) {
