@@ -272,7 +272,10 @@ async function getBalance(userId) {
   const r = await pool.query(`SELECT balance FROM coins WHERE user_id=$1`, [userId]);
   return r.rowCount ? Number(r.rows[0].balance) : 0;
 }
-function randInt(min, max) { return Math.floor(Math.random() * (max - max + 1)) + min; } // 正しい定義
+// ✅ 修正済み：min〜max を含む整数乱数
+function randInt(min, max) {
+  return Math.floor(Math.random() * (max - min + 1)) + min;
+}
 
 async function resolveBet(userId, requested) {
   const bal = await getBalance(userId);
